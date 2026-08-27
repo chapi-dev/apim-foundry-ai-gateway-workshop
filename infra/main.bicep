@@ -55,7 +55,7 @@ module foundry2 'modules/foundry.bicep' = {
     name: '${prefix}${suffix}aoai2'
     location: location
     tags: tags
-    deployEmbeddings: false
+    deployEmbeddings: true
   }
 }
 

@@ -54,6 +54,22 @@ resource appiLogger 'Microsoft.ApiManagement/service/loggers@2024-06-01-preview'
   }
 }
 
+// Diagnóstico a nivel de servicio: habilita logging y métricas personalizadas (tokens)
+resource serviceDiagnostic 'Microsoft.ApiManagement/service/diagnostics@2024-06-01-preview' = {
+  parent: apim
+  name: 'applicationinsights'
+  properties: {
+    loggerId: appiLogger.id
+    alwaysLog: 'allErrors'
+    metrics: true
+    sampling: {
+      samplingType: 'fixed'
+      percentage: 100
+    }
+    verbosity: 'information'
+  }
+}
+
 // Un backend individual por cada despliegue de Foundry, con circuit breaker.
 resource backends 'Microsoft.ApiManagement/service/backends@2024-06-01-preview' = [
   for (endpoint, i) in foundryEndpoints: {

@@ -18,6 +18,12 @@
             estimate-prompt-tokens="false"
             tokens-consumed-header-name="x-tokens-consumed"
             remaining-tokens-header-name="x-tokens-remaining" />
+        <!-- 03 · Métricas de tokens a Application Insights (consumo y coste por dimensión) -->
+        <llm-emit-token-metric namespace="ai-gateway">
+            <dimension name="Subscription ID" />
+            <dimension name="API ID" />
+            <dimension name="Deployment" value="@(context.Request.MatchedParameters.ContainsKey("deployment") ? context.Request.MatchedParameters["deployment"] : "n/a")" />
+        </llm-emit-token-metric>
         <!-- 04 · Balanceo de carga / failover entre despliegues de Foundry -->
         <set-backend-service backend-id="aoai-pool" />
     </inbound>
@@ -26,14 +32,8 @@
     </backend>
     <outbound>
         <base />
-        <!-- 03 · Métricas de tokens a Application Insights (consumo y coste por dimensión) -->
-        <llm-emit-token-metric namespace="ai-gateway">
-            <dimension name="Subscription Id" value="@(context.Subscription.Id ?? "anon")" />
-            <dimension name="API Id" value="@(context.Api.Id)" />
-            <dimension name="Deployment" value="@(context.Request.MatchedParameters.ContainsKey("deployment") ? context.Request.MatchedParameters["deployment"] : "n/a")" />
-        </llm-emit-token-metric>
-        <!-- Cabecera con el backend elegido, útil para ver el balanceo en las demos -->
-        <set-header name="x-backend-url" exists-action="override">
+        <!-- Cabecera con la URL de la petición, útil para ver el balanceo en las demos -->
+        <set-header name="x-request-url" exists-action="override">
             <value>@(context.Request.Url.ToString())</value>
         </set-header>
     </outbound>
