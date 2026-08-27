@@ -129,7 +129,11 @@ Después, sigue los [labs](labs/) en orden.
 > (incluida la caché semántica). Para producción usa **BasicV2/StandardV2/PremiumV2**
 > (SLA, VNet, autoescalado). Cambia el SKU con `./scripts/deploy.ps1 -ApimSku StandardV2`.
 
-Al terminar: `./scripts/cleanup.ps1` elimina todo.
+Al terminar (limpieza segura):
+```powershell
+./scripts/cleanup.ps1 -Mode RedundantApim            # borra solo el APIM Developer redundante
+# ⚠️ Los Foundry de rg-apim-workshop son backends del gateway reutilizado: no borres el RG completo.
+```
 
 ---
 
