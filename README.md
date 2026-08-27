@@ -113,6 +113,10 @@ sobre los Foundry.
 
 Después, sigue los [labs](labs/) en orden.
 
+> 🎬 **¿Vas a presentar en directo?** Usa el [**guión de demo** (`labs/DEMO.md`)](labs/DEMO.md):
+> secuencia lista con comandos copy-paste apuntando al gateway ya desplegado, tiempos y qué
+> resaltar en cada acto.
+
 ---
 
 ## 💸 Coste (orientativo, Sweden Central)
