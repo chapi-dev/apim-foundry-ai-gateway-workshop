@@ -68,6 +68,15 @@ module apim 'modules/apim.bicep' = {
     skuName: apimSku
     publisherEmail: publisherEmail
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
+  }
+}
+
+// Añade la API del AI Gateway (backends + pool + política) al APIM recién creado
+module aiApi 'modules/ai-gateway-api.bicep' = {
+  name: 'ai-gateway-api'
+  params: {
+    apimName: apim.outputs.name
+    loggerName: apim.outputs.loggerName
     foundryEndpoints: [
       foundry1.outputs.endpoint
       foundry2.outputs.endpoint

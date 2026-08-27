@@ -84,6 +84,37 @@ Después, sigue los [labs](labs/) en orden.
 
 ---
 
+## ♻️ Modo reutilización (usar un APIM existente)
+
+Si ya tienes un **APIM** (idealmente v2: BasicV2/StandardV2/PremiumV2) puedes **reutilizarlo**
+en vez de pagar uno nuevo. El workshop añade su API/producto/backends/política de forma
+**aditiva** (no toca tus APIs existentes) y da a la Managed Identity del APIM permiso keyless
+sobre los Foundry.
+
+1. Edita `infra/main.reuse.bicepparam`:
+   ```bicep
+   param existingApimName = 'apim-aigw-dev-01'
+   param existingApimResourceGroup = 'rg-aigateway-dev-01'
+   param existingApimPrincipalId = '<principalId de la MI del APIM>'   // az apim show ... --query identity.principalId
+   param existingLoggerName = 'appi-aigw-dev-01'                       // logger App Insights ya existente (o '')
+   param foundryAccountNames = [ 'miFoundry1', 'miFoundry2' ]          // cuentas de Foundry a usar como backends
+   ```
+2. Aplica (desde el RG donde viven los Foundry):
+   ```powershell
+   ./scripts/deploy-reuse.ps1 -FoundryResourceGroup rg-apim-workshop
+   ./scripts/get-keys.ps1 -ApimName apim-aigw-dev-01 -ResourceGroup rg-aigateway-dev-01
+   ```
+
+> **Ventajas:** ahorras el coste del segundo APIM y reutilizas su Application Insights para las
+> métricas de tokens. Los backends pueden estar en otra región que el APIM (cross-region, válido
+> para demos).
+
+---
+
+Después, sigue los [labs](labs/) en orden.
+
+---
+
 ## 💸 Coste (orientativo, Sweden Central)
 
 | Recurso | SKU | Coste aprox. |
