@@ -37,6 +37,7 @@ OpenAI y reenvía a APIM.
 | Opción | Protocolo | Ruta | Lab |
 |--------|-----------|------|-----|
 | **Claude Code** ("cloud code") | Anthropic | Claude Code → LiteLLM → APIM → Foundry | [08](labs/08-cliente-claude-code.md) |
+| **Claude Code → Claude nativo** | Anthropic | Claude Code → APIM → Foundry (Claude) | [11](labs/11-claude-en-foundry.md) |
 | **GitHub Copilot CLI + `gh`** | — | Copilot nativo + `gh copilot` en terminal | [09](labs/09-cliente-copilot-cli.md) |
 | **OpenAI SDK genérico** | OpenAI | App → APIM → Foundry | [01](labs/01-desplegar-y-primera-llamada.md) |
 | **Foundry directo** (línea base) | OpenAI | App → Foundry (sin gobierno) | comparativa |
