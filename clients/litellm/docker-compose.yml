@@ -1,0 +1,12 @@
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - APIM_GATEWAY_URL=${APIM_GATEWAY_URL}
+      - APIM_SUBSCRIPTION_KEY=${APIM_SUBSCRIPTION_KEY}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}

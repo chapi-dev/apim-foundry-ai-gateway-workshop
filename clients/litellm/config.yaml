@@ -1,0 +1,26 @@
+# LiteLLM · puente Anthropic -> Azure AI Foundry (a través de APIM)
+#
+# Claude Code habla el protocolo Anthropic (/v1/messages). Foundry expone protocolo
+# OpenAI. LiteLLM traduce y envía las peticiones a APIM (que aplica el gobierno del
+# AI Gateway) usando el mismo endpoint compatible con Azure OpenAI.
+#
+# Variables de entorno necesarias (ver clients/litellm/.env.example):
+#   APIM_GATEWAY_URL         p.ej. https://aigw-xxxxx-apim.azure-api.net
+#   APIM_SUBSCRIPTION_KEY    clave de suscripción del producto "AI Workshop"
+#   LITELLM_MASTER_KEY       token que usará Claude Code como ANTHROPIC_AUTH_TOKEN
+
+model_list:
+  # Cualquier modelo que pida Claude Code se enruta al despliegue "chat" de Foundry vía APIM.
+  - model_name: "*"
+    litellm_params:
+      model: azure/chat
+      api_base: os.environ/APIM_GATEWAY_URL
+      api_version: "2024-10-21"
+      api_key: os.environ/APIM_SUBSCRIPTION_KEY
+
+litellm_settings:
+  drop_params: true          # descarta campos Anthropic (p.ej. thinking) que OpenAI no acepta
+  telemetry: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

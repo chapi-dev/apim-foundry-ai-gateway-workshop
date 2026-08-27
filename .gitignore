@@ -1,0 +1,13 @@
+# Artefactos locales
+clients/litellm/.env
+*.env
+!*.env.example
+
+# Bicep compilado
+infra/**/*.json
+!infra/policies/*.json
+
+# Varios
+.DS_Store
+__pycache__/
+*.pyc

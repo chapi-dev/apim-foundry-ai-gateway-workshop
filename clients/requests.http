@@ -1,0 +1,28 @@
+### Pruebas HTTP del AI Gateway (REST Client de VS Code)
+### Sustituye las variables por los valores de tu despliegue.
+
+@apim = https://REEMPLAZA-apim.azure-api.net
+@key = REEMPLAZA_CON_TU_CLAVE
+@apiVersion = 2024-10-21
+
+### Chat completions (a través de APIM -> Foundry, con Managed Identity keyless)
+POST {{apim}}/openai/deployments/chat/chat/completions?api-version={{apiVersion}}
+api-key: {{key}}
+Content-Type: application/json
+
+{
+  "messages": [
+    { "role": "system", "content": "Eres un asistente conciso." },
+    { "role": "user", "content": "Dame una idea para un workshop de APIM." }
+  ],
+  "max_tokens": 200
+}
+
+### Embeddings (usado por el semantic cache)
+POST {{apim}}/openai/deployments/embeddings/embeddings?api-version={{apiVersion}}
+api-key: {{key}}
+Content-Type: application/json
+
+{
+  "input": "texto de ejemplo para vectorizar"
+}

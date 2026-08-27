@@ -1,0 +1,14 @@
+<!--
+  Lab 06 · Content safety + jailbreak/prompt shield.
+  Insertar en el bloque <inbound> de la política de la API "ai-gateway".
+  Requisito: un recurso Azure AI Content Safety y un backend de APIM
+  (name: "content-safety-backend") apuntando a su endpoint, con Managed Identity.
+-->
+<llm-content-safety backend-id="content-safety-backend" shield-prompt="true">
+    <categories output-type="EightSeverityLevels">
+        <category name="Hate" threshold="4" />
+        <category name="Violence" threshold="4" />
+        <category name="SelfHarm" threshold="4" />
+        <category name="Sexual" threshold="4" />
+    </categories>
+</llm-content-safety>

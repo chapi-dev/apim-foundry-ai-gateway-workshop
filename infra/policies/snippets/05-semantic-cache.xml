@@ -1,0 +1,22 @@
+<!--
+  Lab 05 · Semantic caching.
+  Insertar estos bloques dentro de la política de la API "ai-gateway".
+  Requisitos previos:
+    - Un backend de embeddings en APIM (name: "embeddings-backend") apuntando a un
+      despliegue text-embedding-3-small en Foundry.
+    - Una caché externa con búsqueda vectorial (Azure Managed Redis) conectada a APIM
+      en "APIs > (tu APIM) > External cache".
+-->
+
+<!-- INBOUND: buscar respuesta cacheada semánticamente similar -->
+<azure-openai-semantic-cache-lookup
+    score-threshold="0.05"
+    embeddings-backend-id="embeddings-backend"
+    embeddings-backend-auth="system-assigned"
+    ignore-system-messages="true"
+    max-message-count="10">
+    <vary-by>@(context.Subscription.Id)</vary-by>
+</azure-openai-semantic-cache-lookup>
+
+<!-- OUTBOUND: almacenar la respuesta para futuras coincidencias -->
+<azure-openai-semantic-cache-store duration="120" />

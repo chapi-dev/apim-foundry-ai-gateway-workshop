@@ -1,0 +1,43 @@
+<!--
+  Política aplicada a nivel de API "AI Gateway".
+  Gobierno siempre activo: Managed Identity (keyless) + límite de tokens + balanceo + métricas.
+  Los labs de semantic cache y content safety añaden bloques sobre esta base.
+-->
+<policies>
+    <inbound>
+        <base />
+        <!-- 07 · Managed Identity de APIM -> Azure AI Foundry (sin claves en el cliente) -->
+        <authentication-managed-identity resource="https://cognitiveservices.azure.com"
+            output-token-variable-name="msi-access-token" ignore-error="false" />
+        <set-header name="Authorization" exists-action="override">
+            <value>@("Bearer " + (string)context.Variables["msi-access-token"])</value>
+        </set-header>
+        <!-- 02 · Límite de tokens por clave de suscripción (protege coste y capacidad) -->
+        <llm-token-limit counter-key="@(context.Subscription.Id)"
+            tokens-per-minute="2000"
+            estimate-prompt-tokens="false"
+            tokens-consumed-header-name="x-tokens-consumed"
+            remaining-tokens-header-name="x-tokens-remaining" />
+        <!-- 04 · Balanceo de carga / failover entre despliegues de Foundry -->
+        <set-backend-service backend-id="aoai-pool" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+        <!-- 03 · Métricas de tokens a Application Insights (consumo y coste por dimensión) -->
+        <llm-emit-token-metric namespace="ai-gateway">
+            <dimension name="Subscription Id" value="@(context.Subscription.Id ?? "anon")" />
+            <dimension name="API Id" value="@(context.Api.Id)" />
+            <dimension name="Deployment" value="@(context.Request.MatchedParameters.ContainsKey("deployment") ? context.Request.MatchedParameters["deployment"] : "n/a")" />
+        </llm-emit-token-metric>
+        <!-- Cabecera con el backend elegido, útil para ver el balanceo en las demos -->
+        <set-header name="x-backend-url" exists-action="override">
+            <value>@(context.Request.Url.ToString())</value>
+        </set-header>
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
