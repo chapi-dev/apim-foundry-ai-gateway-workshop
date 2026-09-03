@@ -81,25 +81,39 @@ foreach ($acct in @('aigwqyxvxaoai1','aigwqyxvxaoai2')) {
 **Models → Add models → Import from Foundry**: elige suscripción y recurso, y el asistente
 **descubre los despliegues** solo. En *Provider details* escoge **Managed identity**.
 
-> ⚠️ **Usa el asistente, no la API.** Crear el proveedor a mano por ARM deja la configuración
-> a medias: los objetos se crean y se listan, pero el gateway **no publica la ruta** y el
-> runtime responde `404` (igual con clave que sin ella, y sigue igual pasados 6 minutos, así
-> que no es propagación). Con `kind: Foundry` el servicio lo dice explícitamente al registrar
-> un modelo:
+También se puede hacer por ARM (ver el bloque de abajo), pero hay un detalle que cuesta un rato
+descubrir porque el síntoma engaña:
+
+> ⚠️ **El `model` del cuerpo tiene que ser el nombre del *despliegue*, no el del modelo.**
+> El gateway enruta por **coincidencia exacta** de `deployment.modelName`, y cuando no encuentra
+> nada responde **`404` sin cuerpo** — el mismo error que si la ruta no existiera. Con un
+> despliegue llamado `chat` que sirve `gpt-4.1-mini`:
 >
 > ```
-> ValidationError: Parent provider 'foundry-1' has no projected backend;
->                  cannot project model 'gpt-4.1-mini'.
+> {"model":"gpt-4.1-mini"}  -> 404      el nombre del modelo NO vale
+> {"model":"chat"}          -> 200      el nombre del despliegue SI
 > ```
 >
-> Con `kind: Custom` sí se proyecta el backend y el modelo se crea sin error — pero la ruta
-> tampoco llega a publicarse. El paso que falta lo dispara el asistente del portal. La API de
-> gestión que lo expone es `2026-05-01-preview` y **puede no estar desplegada todavía** en tu
-> suscripción, aunque el feature flag figure como `Registered`.
+> El nombre que le pongas al recurso en el gateway (`.../models/<este>`) es solo una etiqueta:
+> no interviene en el enrutado.
+
+> **`foundry.endpoint` es obligatorio de facto** y tiene que ser el de *AI Foundry API*
+> (`https://<cuenta>.services.ai.azure.com/`), que sale en
+> `az cognitiveservices account show --query properties.endpoints`. Si lo omites, el modelo
+> falla al crearse con `Parent provider '<p>' has no projected backend; cannot project model`.
 
 > La unicidad se comprueba sobre **`deployment.modelName`**, no sobre el nombre que le pongas al
-> modelo. Como los dos Foundry del workshop tienen un despliegue llamado `chat`, solo puedes
-> registrar uno: es justo lo que impide reproducir el [lab 04](04-balanceo-y-failover.md).
+> modelo:
+>
+> ```
+> ValidationError: A model with deployment.modelName 'chat' already exists in this workspace.
+>                  Model names must be unique within a workspace.
+> ```
+>
+> Como los dos Foundry del workshop tienen un despliegue llamado `chat`, **no puedes registrar
+> los dos**. Se sortea renombrando: crea en el segundo un despliegue `chat-eu` y regístralo
+> aparte. Pero eso te deja **dos modelos con nombres distintos**, no uno balanceado entre dos
+> backends — por eso el [lab 04](04-balanceo-y-failover.md) sigue sin ser reproducible.
 
 <details>
 <summary>Modelo de objetos ARM (por si quieres inspeccionarlo)</summary>
@@ -116,20 +130,32 @@ clásicos (`apis`, `backends`, `products`, `namedValues`, `subscriptions`, `poli
 .../service/<gw>/apikeys                                     # ojo: a nivel de servicio
 ```
 
-Un proveedor Foundry se describe así (`api-version=2025-09-01-preview`):
+Un proveedor Foundry se describe así (`api-version=2025-09-01-preview`; las versiones
+posteriores que cita la doc, incluida `2026-05-01-preview`, todavía no responden):
 
 ```json
 { "properties": { "kind": "Foundry", "displayName": "Foundry Sweden 1",
-  "foundry": { "endpoint": "https://<cuenta>.cognitiveservices.azure.com/",
+  "foundry": { "endpoint": "https://<cuenta>.services.ai.azure.com/",
     "resourceIds": [ "/subscriptions/.../accounts/<cuenta>" ],
     "authentication": { "kind": "ManagedIdentity" } } } }
 ```
 
-Y un modelo, donde `supportedEndpoints` son **rutas relativas**:
+Y un modelo, donde `supportedEndpoints` son **rutas relativas** y `modelName` es el nombre del
+**despliegue** en Foundry (el valor que los clientes mandan en `model`):
 
 ```json
 { "properties": { "supportedEndpoints": [ "/chat/completions" ],
   "deployment": { "modelName": "chat", "resourceId": "/subscriptions/.../accounts/<cuenta>" } } }
+```
+
+Un servidor MCP usa `type` (no `kind`), con valores `Mcp`, `OpenApi` o `Connector`, y cada
+endpoint indica su origen en `mcp.url` (inline) o `backendId` (referencia):
+
+```json
+{ "properties": { "displayName": "Microsoft Learn", "type": "Mcp",
+  "endpoints": [ { "name": "learn", "kind": "Mcp",
+    "mcp": { "url": "https://learn.microsoft.com/api/mcp" },
+    "authentication": { "kind": "None" } } ] } }
 ```
 
 Un proveedor `Custom` (para Anthropic, Bedrock, Vertex o cualquier endpoint propio) lleva la
@@ -175,6 +201,11 @@ az rest --method post --url "https://management.azure.com$svc/apikeys/master/lis
 
 El contador de *Token rate limit* se reparte por **identidad del llamante** o por **IP**.
 
+> Las políticas **solo se configuran por portal** en preview. La doc dice que en el control plane
+> cada política es un objeto JSON, pero en `2025-09-01-preview` no hay recurso ARM que las
+> exponga: `policies` devuelve `400 Method not allowed in AIGateway pricing tier` y el resto de
+> nombres, `404`. Modelos y MCP sí son automatizables; las políticas, todavía no.
+
 > ⚠️ Las cabeceras de cuota **cambian de nombre** respecto al SKU clásico:
 > aquí son `remaining-tokens` / `consumed-tokens` (en el clásico, `x-tokens-remaining` /
 > `x-tokens-consumed`). Cualquier cliente que las lea hay que tocarlo.
@@ -185,9 +216,18 @@ El contador de *Token rate limit* se reparte por **identidad del llamante** o po
 $g   = "https://<gateway>.azure-api.net"
 $key = "<runtime-access-key>"
 
-$body = @{ model = "gpt-4.1-mini"; messages = @(@{ role = "user"; content = "Hola" }) } | ConvertTo-Json -Depth 5
+# OJO: "model" es el nombre del DESPLIEGUE en Foundry, no el del modelo
+$body = @{ model = "chat"; messages = @(@{ role = "user"; content = "Hola" }) } | ConvertTo-Json -Depth 5
 
 Invoke-RestMethod -Uri "$g/default/models/openai/v1/chat/completions" -Method POST `
+  -Headers @{ "api-key" = $key } -ContentType "application/json" -Body $body
+```
+
+Para embeddings, misma clave y misma raíz, cambiando la última parte de la ruta:
+
+```powershell
+$body = @{ model = "embeddings"; input = "hola mundo" } | ConvertTo-Json
+Invoke-RestMethod -Uri "$g/default/models/openai/v1/embeddings" -Method POST `
   -Headers @{ "api-key" = $key } -ContentType "application/json" -Body $body
 ```
 
@@ -207,6 +247,19 @@ https://<gateway>.azure-api.net/default/toolservers/<server>/mcp
 ```
 
 Con la misma `api-key`. Es el punto donde este SKU **supera** claramente al clásico.
+
+Para comprobar que federa bien, pídele la lista de tools por JSON-RPC:
+
+```powershell
+$body = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+Invoke-RestMethod -Uri "$g/default/toolservers/learn/mcp" -Method POST `
+  -Headers @{ "api-key" = $key; "Accept" = "application/json, text/event-stream" } `
+  -ContentType "application/json" -Body $body
+```
+
+Apuntando el servidor al MCP público de Microsoft Learn (`https://learn.microsoft.com/api/mcp`),
+la respuesta trae sus tres herramientas —`microsoft_docs_search`, `microsoft_code_sample_search`
+y `microsoft_docs_fetch`— servidas ya por tu gateway y con tu clave, no con la del origen.
 
 ## Paso 7 · Observabilidad
 
