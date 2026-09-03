@@ -84,6 +84,19 @@ module aiApi 'modules/ai-gateway-api.bicep' = {
   }
 }
 
+// Puente Anthropic -> OpenAI para clientes que hablan protocolo Anthropic (Claude Code)
+// sobre los modelos OpenAI de Foundry, sin LiteLLM.
+module anthropicBridge 'modules/anthropic-bridge.bicep' = {
+  name: 'anthropic-bridge'
+  dependsOn: [
+    aiApi
+  ]
+  params: {
+    apimName: apim.outputs.name
+    loggerName: apim.outputs.loggerName
+  }
+}
+
 // Managed Identity de APIM con permiso keyless sobre ambos Foundry
 module role1 'modules/roleAssignment.bicep' = {
   name: 'role-aoai1'

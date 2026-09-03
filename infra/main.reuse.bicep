@@ -50,4 +50,18 @@ module aiApi 'modules/ai-gateway-api.bicep' = {
   }
 }
 
+// Puente Anthropic -> OpenAI para clientes que hablan protocolo Anthropic (Claude Code)
+// sobre los modelos OpenAI de Foundry, sin LiteLLM. Reutiliza el pool y el producto anteriores.
+module anthropicBridge 'modules/anthropic-bridge.bicep' = {
+  scope: resourceGroup(existingApimResourceGroup)
+  name: 'anthropic-bridge-reuse'
+  dependsOn: [
+    aiApi
+  ]
+  params: {
+    apimName: existingApimName
+    loggerName: existingLoggerName
+  }
+}
+
 output apimName string = existingApimName

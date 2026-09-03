@@ -1,0 +1,553 @@
+<!--
+  Operación POST /v1/messages  ·  Puente Anthropic -> Azure OpenAI SIN LiteLLM.
+
+  Traduce en el propio gateway:
+    inbound   Anthropic Messages API  ->  OpenAI Chat Completions (Foundry)
+    outbound  OpenAI Chat Completions ->  Anthropic Messages API
+
+  Cubre system, bloques de contenido, imágenes, tools, tool_use y tool_result, y sintetiza
+  los eventos SSE de Anthropic cuando el cliente pide "stream": true.
+
+  Nota: la llamada al backend siempre va sin streaming; los eventos SSE se generan al final.
+  El texto llega de una vez en lugar de token a token (ver el lab 12 para el detalle).
+-->
+<policies>
+    <inbound>
+        <base />
+        <!-- Cuerpo original de Anthropic; preserveContent para poder reescribirlo después -->
+        <set-variable name="anthropicRequest" value="@(context.Request.Body.As&lt;JObject&gt;(preserveContent: true))" />
+        <set-variable name="wantsStream" value="@{
+            var r = (JObject)context.Variables["anthropicRequest"];
+            return r["stream"] != null &amp;&amp; r["stream"].Type == JTokenType.Boolean &amp;&amp; (bool)r["stream"];
+        }" />
+        <!-- Modelo pedido por el cliente: se devuelve tal cual en la respuesta -->
+        <set-variable name="clientModel" value="@{
+            var r = (JObject)context.Variables["anthropicRequest"];
+            return r["model"] != null ? (string)r["model"] : "{{anthropic-bridge-default-model}}";
+        }" />
+        <!-- Despliegue de Foundry al que se enruta. Un nombre de modelo Anthropic
+             (claude-*) cae al despliegue por defecto; cualquier otro se usa literalmente,
+             lo que permite elegir despliegue con ANTHROPIC_MODEL. -->
+        <set-variable name="deployment" value="@{
+            var m = (string)context.Variables["clientModel"];
+            if (string.IsNullOrWhiteSpace(m)) { return "{{anthropic-bridge-default-model}}"; }
+            if (m.StartsWith("claude", StringComparison.OrdinalIgnoreCase)) { return "{{anthropic-bridge-default-model}}"; }
+            return m;
+        }" />
+
+        <!-- ============ TRADUCCIÓN Anthropic -> OpenAI ============ -->
+        <set-body><![CDATA[@{
+            var req = (JObject)context.Variables["anthropicRequest"];
+            var oai = new JObject();
+            oai["model"] = (string)context.Variables["deployment"];
+
+            var msgs = new JArray();
+
+            // --- system: cadena o array de bloques -> mensaje role=system ---
+            var sys = req["system"];
+            if (sys != null && sys.Type != JTokenType.Null)
+            {
+                string sysText;
+                if (sys.Type == JTokenType.String)
+                {
+                    sysText = (string)sys;
+                }
+                else
+                {
+                    var parts = new List<string>();
+                    if (sys.Type == JTokenType.Array)
+                    {
+                        foreach (var b in (JArray)sys)
+                        {
+                            if ((string)b["type"] == "text" && b["text"] != null) { parts.Add((string)b["text"]); }
+                        }
+                    }
+                    sysText = string.Join("\n\n", parts);
+                }
+                if (!string.IsNullOrWhiteSpace(sysText))
+                {
+                    var sm = new JObject();
+                    sm["role"] = "system";
+                    sm["content"] = sysText;
+                    msgs.Add(sm);
+                }
+            }
+
+            // --- messages ---
+            var inMsgs = req["messages"] as JArray;
+            if (inMsgs != null)
+            {
+                foreach (var msgTok in inMsgs)
+                {
+                    var msg = (JObject)msgTok;
+                    var role = (string)msg["role"];
+                    var content = msg["content"];
+                    if (content == null || content.Type == JTokenType.Null) { continue; }
+
+                    // content como cadena simple
+                    if (content.Type == JTokenType.String)
+                    {
+                        var sm = new JObject();
+                        sm["role"] = role;
+                        sm["content"] = (string)content;
+                        msgs.Add(sm);
+                        continue;
+                    }
+
+                    // content como array de bloques
+                    var textParts = new List<string>();
+                    var imageParts = new JArray();
+                    var toolCalls = new JArray();
+                    var toolResultMsgs = new JArray();
+
+                    foreach (var blkTok in (JArray)content)
+                    {
+                        var blk = (JObject)blkTok;
+                        var btype = (string)blk["type"];
+
+                        if (btype == "text")
+                        {
+                            if (blk["text"] != null) { textParts.Add((string)blk["text"]); }
+                        }
+                        else if (btype == "image")
+                        {
+                            // Anthropic base64 -> data URL de OpenAI
+                            var src = blk["source"] as JObject;
+                            if (src != null)
+                            {
+                                string url = null;
+                                if ((string)src["type"] == "base64")
+                                {
+                                    url = "data:" + (string)src["media_type"] + ";base64," + (string)src["data"];
+                                }
+                                else if ((string)src["type"] == "url")
+                                {
+                                    url = (string)src["url"];
+                                }
+                                if (url != null)
+                                {
+                                    var iu = new JObject();
+                                    iu["url"] = url;
+                                    var ip = new JObject();
+                                    ip["type"] = "image_url";
+                                    ip["image_url"] = iu;
+                                    imageParts.Add(ip);
+                                }
+                            }
+                        }
+                        else if (btype == "tool_use")
+                        {
+                            var fn = new JObject();
+                            fn["name"] = (string)blk["name"];
+                            var input = blk["input"];
+                            fn["arguments"] = input == null || input.Type == JTokenType.Null
+                                ? "{}"
+                                : input.ToString(Newtonsoft.Json.Formatting.None);
+                            var tc = new JObject();
+                            tc["id"] = (string)blk["id"];
+                            tc["type"] = "function";
+                            tc["function"] = fn;
+                            toolCalls.Add(tc);
+                        }
+                        else if (btype == "tool_result")
+                        {
+                            var c = blk["content"];
+                            string ctext;
+                            if (c == null || c.Type == JTokenType.Null) { ctext = ""; }
+                            else if (c.Type == JTokenType.String) { ctext = (string)c; }
+                            else if (c.Type == JTokenType.Array)
+                            {
+                                var cparts = new List<string>();
+                                foreach (var cb in (JArray)c)
+                                {
+                                    if ((string)cb["type"] == "text" && cb["text"] != null) { cparts.Add((string)cb["text"]); }
+                                }
+                                ctext = string.Join("\n", cparts);
+                            }
+                            else { ctext = c.ToString(Newtonsoft.Json.Formatting.None); }
+
+                            if ((bool?)blk["is_error"] == true) { ctext = "ERROR: " + ctext; }
+
+                            var tr = new JObject();
+                            tr["role"] = "tool";
+                            tr["tool_call_id"] = (string)blk["tool_use_id"];
+                            tr["content"] = ctext;
+                            toolResultMsgs.Add(tr);
+                        }
+                    }
+
+                    // Los tool_result son mensajes role=tool independientes y van primero,
+                    // porque OpenAI exige que sigan inmediatamente al assistant con tool_calls.
+                    foreach (var tr in toolResultMsgs) { msgs.Add(tr); }
+
+                    if (role == "assistant")
+                    {
+                        if (textParts.Count > 0 || toolCalls.Count > 0)
+                        {
+                            var am = new JObject();
+                            am["role"] = "assistant";
+                            if (textParts.Count > 0) { am["content"] = string.Join("\n", textParts); }
+                            else { am["content"] = null; }
+                            if (toolCalls.Count > 0) { am["tool_calls"] = toolCalls; }
+                            msgs.Add(am);
+                        }
+                    }
+                    else
+                    {
+                        if (imageParts.Count > 0)
+                        {
+                            // Multimodal: content como array de partes
+                            var parts = new JArray();
+                            if (textParts.Count > 0)
+                            {
+                                var tp = new JObject();
+                                tp["type"] = "text";
+                                tp["text"] = string.Join("\n", textParts);
+                                parts.Add(tp);
+                            }
+                            foreach (var ip in imageParts) { parts.Add(ip); }
+                            var um = new JObject();
+                            um["role"] = role;
+                            um["content"] = parts;
+                            msgs.Add(um);
+                        }
+                        else if (textParts.Count > 0)
+                        {
+                            var um = new JObject();
+                            um["role"] = role;
+                            um["content"] = string.Join("\n", textParts);
+                            msgs.Add(um);
+                        }
+                    }
+                }
+            }
+
+            oai["messages"] = msgs;
+
+            // --- parámetros de muestreo ---
+            // max_tokens es obligatorio en Anthropic; se acota al máximo de salida del modelo.
+            var maxTok = req["max_tokens"] != null ? (int)req["max_tokens"] : 4096;
+            if (maxTok > 16384) { maxTok = 16384; }
+            if (maxTok < 1) { maxTok = 1; }
+            oai["max_tokens"] = maxTok;
+
+            if (req["temperature"] != null) { oai["temperature"] = req["temperature"]; }
+            if (req["top_p"] != null) { oai["top_p"] = req["top_p"]; }
+            var stopSeq = req["stop_sequences"] as JArray;
+            if (stopSeq != null && stopSeq.Count > 0) { oai["stop"] = stopSeq; }
+
+            // --- tools: input_schema -> parameters ---
+            var tools = req["tools"] as JArray;
+            if (tools != null && tools.Count > 0)
+            {
+                var oaiTools = new JArray();
+                foreach (var tTok in tools)
+                {
+                    var t = (JObject)tTok;
+                    if (t["name"] == null) { continue; }
+                    var fn = new JObject();
+                    fn["name"] = (string)t["name"];
+                    if (t["description"] != null) { fn["description"] = (string)t["description"]; }
+                    var schema = t["input_schema"];
+                    fn["parameters"] = schema != null && schema.Type == JTokenType.Object ? schema : new JObject();
+                    var wrap = new JObject();
+                    wrap["type"] = "function";
+                    wrap["function"] = fn;
+                    oaiTools.Add(wrap);
+                }
+                if (oaiTools.Count > 0)
+                {
+                    oai["tools"] = oaiTools;
+                    var tc = req["tool_choice"] as JObject;
+                    if (tc != null)
+                    {
+                        var tct = (string)tc["type"];
+                        if (tct == "auto") { oai["tool_choice"] = "auto"; }
+                        else if (tct == "any") { oai["tool_choice"] = "required"; }
+                        else if (tct == "none") { oai["tool_choice"] = "none"; }
+                        else if (tct == "tool" && tc["name"] != null)
+                        {
+                            var f = new JObject();
+                            f["name"] = (string)tc["name"];
+                            var w = new JObject();
+                            w["type"] = "function";
+                            w["function"] = f;
+                            oai["tool_choice"] = w;
+                        }
+                    }
+                }
+            }
+
+            // El backend se llama siempre sin streaming; el SSE se sintetiza en outbound.
+            oai["stream"] = false;
+            return oai.ToString(Newtonsoft.Json.Formatting.None);
+        }]]></set-body>
+
+        <!-- Ruta de Azure OpenAI dentro del backend (.../openai) -->
+        <rewrite-uri template="@("/deployments/" + (string)context.Variables["deployment"] + "/chat/completions?api-version=2024-10-21")" />
+
+        <!-- Cabeceras propias de Anthropic que el backend no debe recibir -->
+        <set-header name="x-api-key" exists-action="delete" />
+        <set-header name="anthropic-version" exists-action="delete" />
+        <set-header name="anthropic-beta" exists-action="delete" />
+        <set-header name="anthropic-dangerous-direct-browser-access" exists-action="delete" />
+
+        <!-- 07 · Managed Identity de APIM -> Foundry (sin claves en el cliente) -->
+        <authentication-managed-identity resource="https://cognitiveservices.azure.com"
+            output-token-variable-name="msi-access-token" ignore-error="false" />
+        <set-header name="Authorization" exists-action="override">
+            <value>@("Bearer " + (string)context.Variables["msi-access-token"])</value>
+        </set-header>
+
+        <!-- 02/03 · El mismo gobierno que el resto del gateway: el cuerpo ya es OpenAI,
+             así que las políticas LLM lo entienden igual que en la API nativa.
+             ⚠️ El límite es MUY superior al de la API de demo (2000 TPM): solo el system
+             prompt de Claude Code, con todas sus definiciones de herramientas, ronda los
+             10-15k tokens por petición. Con 2000 TPM el cliente recibe 429 antes de
+             arrancar. Se ajusta con el valor con nombre anthropic-bridge-tpm. -->
+        <llm-token-limit counter-key="@(context.Subscription.Id)"
+            tokens-per-minute="{{anthropic-bridge-tpm}}"
+            estimate-prompt-tokens="false"
+            tokens-consumed-header-name="x-tokens-consumed"
+            remaining-tokens-header-name="x-tokens-remaining" />
+        <llm-emit-token-metric namespace="ai-gateway">
+            <dimension name="Subscription ID" />
+            <dimension name="API ID" />
+            <dimension name="Deployment" value="@((string)context.Variables["deployment"])" />
+        </llm-emit-token-metric>
+
+        <!-- 04 · Mismo pool de backends: balanceo y circuit breaker -->
+        <set-backend-service backend-id="aoai-pool" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+        <choose>
+            <!-- ============ TRADUCCIÓN OpenAI -> Anthropic ============ -->
+            <when condition="@(context.Response.StatusCode == 200)">
+                <set-variable name="anthropicResponse" value="@{
+                    var oai = context.Response.Body.As&lt;JObject&gt;(preserveContent: true);
+                    var contentArr = new JArray();
+                    string stopReason = "end_turn";
+                    int inTok = 0, outTok = 0;
+
+                    var choices = oai["choices"] as JArray;
+                    if (choices != null &amp;&amp; choices.Count > 0)
+                    {
+                        var choice = (JObject)choices[0];
+                        var msg = choice["message"] as JObject;
+                        if (msg != null)
+                        {
+                            var txt = msg["content"];
+                            if (txt != null &amp;&amp; txt.Type == JTokenType.String &amp;&amp; !string.IsNullOrEmpty((string)txt))
+                            {
+                                var tb = new JObject();
+                                tb["type"] = "text";
+                                tb["text"] = (string)txt;
+                                contentArr.Add(tb);
+                            }
+                            var tcs = msg["tool_calls"] as JArray;
+                            if (tcs != null)
+                            {
+                                foreach (var tcTok in tcs)
+                                {
+                                    var tc = (JObject)tcTok;
+                                    var fn = tc["function"] as JObject;
+                                    if (fn == null) { continue; }
+                                    JToken input;
+                                    var argsStr = (string)fn["arguments"];
+                                    try { input = string.IsNullOrWhiteSpace(argsStr) ? new JObject() : JToken.Parse(argsStr); }
+                                    catch { input = new JObject(); }
+                                    var ub = new JObject();
+                                    ub["type"] = "tool_use";
+                                    ub["id"] = tc["id"] != null ? (string)tc["id"] : ("toolu_" + Guid.NewGuid().ToString("N").Substring(0, 16));
+                                    ub["name"] = (string)fn["name"];
+                                    ub["input"] = input;
+                                    contentArr.Add(ub);
+                                }
+                            }
+                        }
+                        var fr = (string)choice["finish_reason"];
+                        if (fr == "length") { stopReason = "max_tokens"; }
+                        else if (fr == "tool_calls" || fr == "function_call") { stopReason = "tool_use"; }
+                        else if (fr == "content_filter") { stopReason = "refusal"; }
+                        else { stopReason = "end_turn"; }
+                    }
+
+                    var usage = oai["usage"] as JObject;
+                    if (usage != null)
+                    {
+                        if (usage["prompt_tokens"] != null) { inTok = (int)usage["prompt_tokens"]; }
+                        if (usage["completion_tokens"] != null) { outTok = (int)usage["completion_tokens"]; }
+                    }
+
+                    // Anthropic exige al menos un bloque de contenido
+                    if (contentArr.Count == 0)
+                    {
+                        var tb = new JObject();
+                        tb["type"] = "text";
+                        tb["text"] = "";
+                        contentArr.Add(tb);
+                    }
+
+                    var id = oai["id"] != null ? ((string)oai["id"]).Replace("chatcmpl-", "") : Guid.NewGuid().ToString("N");
+                    var u = new JObject();
+                    u["input_tokens"] = inTok;
+                    u["output_tokens"] = outTok;
+
+                    var resp = new JObject();
+                    resp["id"] = "msg_" + id;
+                    resp["type"] = "message";
+                    resp["role"] = "assistant";
+                    resp["model"] = (string)context.Variables["clientModel"];
+                    resp["content"] = contentArr;
+                    resp["stop_reason"] = stopReason;
+                    resp["stop_sequence"] = null;
+                    resp["usage"] = u;
+                    return resp;
+                }" />
+                <choose>
+                    <!-- El cliente pidió streaming: se sintetiza la secuencia de eventos SSE -->
+                    <when condition="@((bool)context.Variables["wantsStream"])">
+                        <set-header name="Content-Type" exists-action="override">
+                            <value>text/event-stream</value>
+                        </set-header>
+                        <set-header name="Cache-Control" exists-action="override">
+                            <value>no-cache</value>
+                        </set-header>
+                        <set-body><![CDATA[@{
+                            var resp = (JObject)context.Variables["anthropicResponse"];
+                            var content = (JArray)resp["content"];
+                            var usage = (JObject)resp["usage"];
+                            var fmt = Newtonsoft.Json.Formatting.None;
+                            var sse = new List<string>();
+
+                            // message_start: mismo mensaje pero sin contenido y sin stop_reason
+                            var startMsg = (JObject)resp.DeepClone();
+                            startMsg["content"] = new JArray();
+                            startMsg["stop_reason"] = null;
+                            ((JObject)startMsg["usage"])["output_tokens"] = 0;
+                            var ev = new JObject();
+                            ev["type"] = "message_start";
+                            ev["message"] = startMsg;
+                            sse.Add("event: message_start\ndata: " + ev.ToString(fmt) + "\n\n");
+
+                            for (int i = 0; i < content.Count; i++)
+                            {
+                                var blk = (JObject)content[i];
+                                var btype = (string)blk["type"];
+
+                                var startBlk = new JObject();
+                                var deltaEv = new JObject();
+
+                                if (btype == "tool_use")
+                                {
+                                    var cb = new JObject();
+                                    cb["type"] = "tool_use";
+                                    cb["id"] = blk["id"];
+                                    cb["name"] = blk["name"];
+                                    cb["input"] = new JObject();
+                                    startBlk["type"] = "content_block_start";
+                                    startBlk["index"] = i;
+                                    startBlk["content_block"] = cb;
+
+                                    var d = new JObject();
+                                    d["type"] = "input_json_delta";
+                                    d["partial_json"] = blk["input"].ToString(fmt);
+                                    deltaEv["type"] = "content_block_delta";
+                                    deltaEv["index"] = i;
+                                    deltaEv["delta"] = d;
+                                }
+                                else
+                                {
+                                    var cb = new JObject();
+                                    cb["type"] = "text";
+                                    cb["text"] = "";
+                                    startBlk["type"] = "content_block_start";
+                                    startBlk["index"] = i;
+                                    startBlk["content_block"] = cb;
+
+                                    var d = new JObject();
+                                    d["type"] = "text_delta";
+                                    d["text"] = (string)blk["text"];
+                                    deltaEv["type"] = "content_block_delta";
+                                    deltaEv["index"] = i;
+                                    deltaEv["delta"] = d;
+                                }
+
+                                var stopBlk = new JObject();
+                                stopBlk["type"] = "content_block_stop";
+                                stopBlk["index"] = i;
+
+                                sse.Add("event: content_block_start\ndata: " + startBlk.ToString(fmt) + "\n\n");
+                                sse.Add("event: content_block_delta\ndata: " + deltaEv.ToString(fmt) + "\n\n");
+                                sse.Add("event: content_block_stop\ndata: " + stopBlk.ToString(fmt) + "\n\n");
+                            }
+
+                            var md = new JObject();
+                            md["stop_reason"] = resp["stop_reason"];
+                            md["stop_sequence"] = null;
+                            var mu = new JObject();
+                            mu["output_tokens"] = usage["output_tokens"];
+                            var mdEv = new JObject();
+                            mdEv["type"] = "message_delta";
+                            mdEv["delta"] = md;
+                            mdEv["usage"] = mu;
+                            sse.Add("event: message_delta\ndata: " + mdEv.ToString(fmt) + "\n\n");
+
+                            var msEv = new JObject();
+                            msEv["type"] = "message_stop";
+                            sse.Add("event: message_stop\ndata: " + msEv.ToString(fmt) + "\n\n");
+
+                            return string.Join("", sse);
+                        }]]></set-body>
+                    </when>
+                    <otherwise>
+                        <set-body>@(((JObject)context.Variables["anthropicResponse"]).ToString(Newtonsoft.Json.Formatting.None))</set-body>
+                    </otherwise>
+                </choose>
+            </when>
+            <otherwise>
+                <!-- Errores del backend en formato de error de Anthropic -->
+                <set-header name="Content-Type" exists-action="override">
+                    <value>application/json</value>
+                </set-header>
+                <set-body><![CDATA[@{
+                    var code = context.Response.StatusCode;
+                    string etype = "api_error";
+                    if (code == 400) { etype = "invalid_request_error"; }
+                    else if (code == 401) { etype = "authentication_error"; }
+                    else if (code == 403) { etype = "permission_error"; }
+                    else if (code == 404) { etype = "not_found_error"; }
+                    else if (code == 429) { etype = "rate_limit_error"; }
+                    else if (code >= 500) { etype = "api_error"; }
+
+                    string message = "Upstream error " + code;
+                    try
+                    {
+                        var body = context.Response.Body.As<JObject>(preserveContent: true);
+                        if (body["error"] != null && body["error"]["message"] != null)
+                        {
+                            message = (string)body["error"]["message"];
+                        }
+                        else if (body["message"] != null) { message = (string)body["message"]; }
+                    }
+                    catch { }
+
+                    var err = new JObject();
+                    err["type"] = etype;
+                    err["message"] = message;
+                    var wrap = new JObject();
+                    wrap["type"] = "error";
+                    wrap["error"] = err;
+                    return wrap.ToString(Newtonsoft.Json.Formatting.None);
+                }]]></set-body>
+            </otherwise>
+        </choose>
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>

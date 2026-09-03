@@ -1,0 +1,52 @@
+<!--
+  Operación GET /v1/models
+
+  Devuelve, en el formato del endpoint de modelos de Anthropic, los despliegues de Foundry
+  que se pueden usar como valor de ANTHROPIC_MODEL. Se resuelve en el gateway.
+  La lista se configura con el valor con nombre "anthropic-bridge-models" del APIM.
+
+  ⚠️ El valor con nombre se lee en un set-variable y NO dentro del CDATA: APIM no sustituye
+  {{...}} dentro de secciones CDATA, se quedaría como texto literal.
+-->
+<policies>
+    <inbound>
+        <base />
+        <set-variable name="modelList" value="{{anthropic-bridge-models}}" />
+        <return-response>
+            <set-status code="200" reason="OK" />
+            <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+            </set-header>
+            <set-body><![CDATA[@{
+                var raw = (string)context.Variables["modelList"];
+                var data = new JArray();
+                foreach (var name in raw.Split(','))
+                {
+                    var id = name.Trim();
+                    if (id.Length == 0) { continue; }
+                    var m = new JObject();
+                    m["type"] = "model";
+                    m["id"] = id;
+                    m["display_name"] = id;
+                    m["created_at"] = "2026-01-01T00:00:00Z";
+                    data.Add(m);
+                }
+                var body = new JObject();
+                body["data"] = data;
+                body["has_more"] = false;
+                body["first_id"] = data.Count > 0 ? (string)((JObject)data[0])["id"] : null;
+                body["last_id"] = data.Count > 0 ? (string)((JObject)data[data.Count - 1])["id"] : null;
+                return body.ToString(Newtonsoft.Json.Formatting.None);
+            }]]></set-body>
+        </return-response>
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>

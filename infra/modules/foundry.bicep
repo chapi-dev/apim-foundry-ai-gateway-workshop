@@ -20,8 +20,8 @@ param chatModelName string = 'gpt-4.1-mini'
 @description('Versión del modelo de chat')
 param chatModelVersion string = '2025-04-14'
 
-@description('Capacidad (miles de TPM) del modelo de chat')
-param chatCapacity int = 20
+@description('Capacidad (miles de TPM) del modelo de chat. 20 se queda corto para clientes agénticos como Claude Code, cuyo system prompt ronda 6-15k tokens por petición (ver lab 12)')
+param chatCapacity int = 150
 
 @description('Nombre del despliegue de embeddings')
 param embeddingsDeploymentName string = 'embeddings'

@@ -1,0 +1,72 @@
+<!--
+  Operación POST /v1/messages/count_tokens
+
+  Claude Code la usa para estimar el tamaño del contexto antes de enviar. Azure OpenAI no
+  expone un endpoint equivalente, así que se responde en el propio gateway con una
+  estimación por caracteres (~4 caracteres por token) sin llamar al backend: es barato,
+  no consume cuota y basta para el uso que le da el cliente.
+-->
+<policies>
+    <inbound>
+        <base />
+        <return-response>
+            <set-status code="200" reason="OK" />
+            <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+            </set-header>
+            <set-body><![CDATA[@{
+                var req = context.Request.Body.As<JObject>(preserveContent: true);
+                int chars = 0;
+
+                var sys = req["system"];
+                if (sys != null && sys.Type == JTokenType.String) { chars += ((string)sys).Length; }
+                else if (sys != null && sys.Type == JTokenType.Array)
+                {
+                    foreach (var b in (JArray)sys)
+                    {
+                        if (b["text"] != null) { chars += ((string)b["text"]).Length; }
+                    }
+                }
+
+                var msgs = req["messages"] as JArray;
+                if (msgs != null)
+                {
+                    foreach (var mTok in msgs)
+                    {
+                        var c = mTok["content"];
+                        if (c == null) { continue; }
+                        if (c.Type == JTokenType.String) { chars += ((string)c).Length; }
+                        else if (c.Type == JTokenType.Array)
+                        {
+                            foreach (var blk in (JArray)c)
+                            {
+                                if (blk["text"] != null) { chars += ((string)blk["text"]).Length; }
+                                else { chars += blk.ToString(Newtonsoft.Json.Formatting.None).Length; }
+                            }
+                        }
+                    }
+                }
+
+                // Las definiciones de tools también ocupan contexto
+                var tools = req["tools"] as JArray;
+                if (tools != null) { chars += tools.ToString(Newtonsoft.Json.Formatting.None).Length; }
+
+                var estimate = chars / 4;
+                if (estimate < 1) { estimate = 1; }
+
+                var body = new JObject();
+                body["input_tokens"] = estimate;
+                return body.ToString(Newtonsoft.Json.Formatting.None);
+            }]]></set-body>
+        </return-response>
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
