@@ -83,9 +83,9 @@ de punta a punta:
 
 ```powershell
 cd scripts
-./aigw-setup.ps1         -GatewayName <gw> -GatewayResourceGroup <rg>   # modelos, MCP, telemetría
+./aigw-setup.ps1         -GatewayName <gw> -GatewayResourceGroup <rg>   # modelos, MCP, políticas, telemetría
 ./aigw-test.ps1          -GatewayName <gw> -GatewayResourceGroup <rg>   # prueba de humo
-./aigw-policies-test.ps1 -GatewayName <gw> -GatewayResourceGroup <rg>   # qué guardarraíles frenan
+./aigw-policies-test.ps1 -GatewayName <gw> -GatewayResourceGroup <rg> -Demo   # guardarraíles: 400 / 403 / 429
 ./aigw-metrics.ps1                                                      # tokens y coste reales
 ```
 

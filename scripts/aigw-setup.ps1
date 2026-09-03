@@ -1,6 +1,6 @@
 # Configura el SKU AI Gateway (preview) de punta a punta: proveedores Foundry, modelos,
-# servidor MCP y exportador de telemetría. Es idempotente (todo son PUT), así que se puede
-# relanzar sin miedo.
+# servidor MCP, políticas de gobierno y exportador de telemetría. Es idempotente, así que se
+# puede relanzar sin miedo.
 #
 #   ./aigw-setup.ps1 -GatewayName dev-testing-apim-preview -GatewayResourceGroup ai-gateway-dev-testing-apim-preview
 #
@@ -15,7 +15,11 @@ param(
     [string]$McpUrl = "https://learn.microsoft.com/api/mcp",
     # Application Insights al que mandar la métrica de tokens. Vacío = no configurar telemetría.
     [string]$AppInsightsName = "appi-aigw-dev-01",
-    [string]$AppInsightsResourceGroup = "rg-aigateway-dev-01"
+    [string]$AppInsightsResourceGroup = "rg-aigateway-dev-01",
+    # Techos de las políticas de gobierno que se aplican a cada asset.
+    [int]$TokensPerMinute = 10000,
+    [int]$CallsPerMinute = 100,
+    [switch]$SkipPolicies
 )
 
 $ErrorActionPreference = "Stop"
@@ -208,13 +212,75 @@ if ($AppInsightsName) {
 }
 
 # --------------------------------------------------------------------------------------------
+Write-Step "6. Politicas de gobierno"
+
+# Las políticas no son un recurso propio: viajan dentro del modelo o del toolserver, en
+# properties.policies, y se aplican con PATCH (el PUT completo choca con la inmutabilidad
+# del asset). Es la misma llamada que hace el asistente del portal.
+# Tipos admitidos: tokenLimit, costLimit, requestRateLimit, contentSafety, fallback,
+# ipFilter y cors.
+if ($SkipPolicies) {
+    Write-Host "  Politicas omitidas (-SkipPolicies)." -ForegroundColor Yellow
+} else {
+    $tokenLimit = @{ type = "tokenLimit"; count = $TokensPerMinute; period = "minute"; counterKey = "IPAddress" }
+    $rateLimit = @{ type = "requestRateLimit"; callsPerPeriod = $CallsPerMinute; periodSeconds = 60; counterKey = "IPAddress" }
+    # El gateway bloquea a partir de la severidad indicada. Medium es el punto de equilibrio.
+    $contentSafety = @{
+        type            = "contentSafety"
+        hateSeverity    = "Medium"
+        violenceSeverity = "Medium"
+        sexualSeverity  = "Medium"
+        selfHarmSeverity = "Medium"
+    }
+
+    $providers = Invoke-Arm -Path "$workspace/modelProviders"
+    foreach ($provider in $providers.Content.value) {
+        $models = Invoke-Arm -Path "$workspace/modelProviders/$($provider.name)/models"
+        foreach ($model in $models.Content.value) {
+            # Los embeddings no pasan por Content Safety: se limitan por número de llamadas.
+            # Ojo: un 'if' usado como expresión desenvuelve los arrays de un solo elemento,
+            # y la API entonces recibe un objeto en vez de una lista.
+            $policies = @($tokenLimit, $contentSafety)
+            if ($model.properties.supportedEndpoints -contains "/embeddings") {
+                $policies = @($rateLimit)
+            }
+            $applied = Invoke-Arm -Path "$workspace/modelProviders/$($provider.name)/models/$($model.name)" `
+                -Method Patch -Body @{ properties = @{ policies = $policies } }
+            Write-Result $applied.Status "modelo '$($model.name)' -> $(($policies.type) -join ', ')"
+            if ($applied.Status -ge 300) { Write-Host "     $($applied.Raw)" -ForegroundColor DarkGray }
+        }
+    }
+
+    $servers = Invoke-Arm -Path "$workspace/toolservers"
+    foreach ($server in $servers.Content.value) {
+        # El control plane devuelve de vez en cuando un 404 "Api not found" pasajero sobre
+        # los toolservers; con un segundo intento se resuelve.
+        $applied = Invoke-Arm -Path "$workspace/toolservers/$($server.name)" `
+            -Method Patch -Body @{ properties = @{ policies = @($rateLimit) } }
+        if ($applied.Status -eq 404) {
+            Start-Sleep -Seconds 3
+            $applied = Invoke-Arm -Path "$workspace/toolservers/$($server.name)" `
+                -Method Patch -Body @{ properties = @{ policies = @($rateLimit) } }
+        }
+        Write-Result $applied.Status "toolserver '$($server.name)' -> requestRateLimit"
+        if ($applied.Status -ge 300) { Write-Host "     $($applied.Raw)" -ForegroundColor DarkGray }
+    }
+}
+
+# --------------------------------------------------------------------------------------------
 Write-Step "Resumen"
 
 foreach ($asset in @("modelProviders", "models", "toolservers", "telemetryExporters")) {
     $list = Invoke-Arm -Path "$workspace/$asset"
     $names = @($list.Content.value | ForEach-Object { $_.name })
-    "{0,-20} {1}" -f $asset, $(if ($names) { $names -join ", " } else { "(vacio)" })
+    Write-Host ("{0,-20} {1}" -f $asset, $(if ($names) { $names -join ", " } else { "(vacio)" }))
 }
 
-Write-Host "`nLas politicas se configuran en el portal: no tienen API de gestion todavia." -ForegroundColor Yellow
-Write-Host "Siguiente paso: ./aigw-test.ps1 -GatewayName $GatewayName -GatewayResourceGroup $GatewayResourceGroup" -ForegroundColor Cyan
+$total = 0
+$all = Invoke-Arm -Path "$workspace/models"
+foreach ($model in $all.Content.value) { $total += @($model.properties.policies).Count }
+$servers = Invoke-Arm -Path "$workspace/toolservers"
+foreach ($server in $servers.Content.value) { $total += @($server.properties.policies).Count }
+Write-Host ("{0,-20} {1}" -f "politicas", $total)
+
+Write-Host "`nSiguiente paso: ./aigw-test.ps1 -GatewayName $GatewayName -GatewayResourceGroup $GatewayResourceGroup" -ForegroundColor Cyan

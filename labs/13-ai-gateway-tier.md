@@ -9,8 +9,8 @@ las herramientas MCP y las políticas se declaran como **objetos de configuraci�
 > Es un **capítulo alternativo** del workshop, no un sustituto de los labs clásicos.
 > Para producción hoy, el camino soportado sigue siendo el SKU clásico (v2).
 
-Todo lo de este lab está automatizado en [`scripts/aigw-*.ps1`](../scripts/) salvo las políticas,
-que en preview solo existen en el portal. Si quieres ir al grano, salta a [Scripts](#scripts).
+Todo lo de este lab está automatizado en [`scripts/aigw-*.ps1`](../scripts/): modelos, servidor
+MCP, políticas y telemetría. Si quieres ir al grano, salta a [Scripts](#scripts).
 
 ---
 
@@ -135,11 +135,15 @@ clásicos (`apis`, `backends`, `products`, `namedValues`, `subscriptions`, `poli
 .../service/<gw>/apikeys                                     # ojo: a nivel de servicio
 ```
 
+Las **políticas no aparecen en esa lista** porque no son un recurso: son un array
+(`properties.policies`) dentro de cada modelo y de cada toolserver. Ver [Paso 4](#paso-4--políticas).
+
 > ⚠️ **Los modelos y los servidores MCP son inmutables.** Un `PUT` sobre uno que ya existe no
 > lo actualiza: el modelo choca con su propia comprobación de unicidad
 > (`A model with deployment.modelName '<x>' already exists`) y el toolserver responde
 > `404 Api not found`. Para cambiar cualquier cosa hay que **borrar y volver a crear**.
 > Por eso el repo trae un [`aigw-cleanup.ps1`](../scripts/aigw-cleanup.ps1).
+> El `PATCH` sí funciona, pero **solo para `policies`**.
 >
 > Con el toolserver además hay que tener cuidado: ese `PUT` fallido **sí llega a tocarlo**, y lo
 > deja federando **cero herramientas** mientras sigue respondiendo `200`. Si `tools/list` te
@@ -250,42 +254,86 @@ Para que el reparto por identidad sirva de algo, **crea una clave por aplicació
 la clave es de ámbito gateway, así que es la única forma de separar presupuestos y atribuir
 consumo.
 
-> Las políticas **solo se configuran por portal** en preview. La doc dice que en el control plane
-> cada política es un objeto JSON, pero en `2025-09-01-preview` no hay recurso ARM que las
-> exponga: `policies` devuelve `400 Method not allowed in AIGateway pricing tier` y el resto de
-> nombres —`guardrails`, `governancePolicies`, `aiPolicies`…— `404`. Tampoco aparece ninguna
-> operación de política en el catálogo del proveedor. Modelos, MCP y telemetría sí son
-> automatizables; las políticas, todavía no.
+> Las políticas **no son un recurso ARM propio**: viajan **dentro** del modelo o del toolserver,
+> en `properties.policies`, y se aplican con un `PATCH` sobre el asset. Es exactamente la misma
+> llamada que hace el asistente del portal, así que **sí se pueden automatizar**:
+>
+> ```http
+> PATCH .../workspaces/default/modelProviders/{proveedor}/models/{modelo}?api-version=2025-09-01-preview
+> { "properties": { "policies": [
+>     { "type": "tokenLimit", "count": 10000, "period": "minute", "counterKey": "IPAddress" },
+>     { "type": "contentSafety", "hateSeverity": "Medium", "violenceSeverity": "Medium",
+>       "sexualSeverity": "Medium", "selfHarmSeverity": "Medium" }
+> ] } }
+> ```
+>
+> El `PATCH` **reemplaza la lista entera**, así que para añadir una política hay que mandar
+> también las que ya estaban. Para quitarlas todas, `"policies": []`.
+> Ojo: `.../workspaces/default/policies` responde `400 Method not allowed in AIGateway pricing
+> tier`, porque ese es el recurso de políticas XML del APIM clásico, que aquí no existe.
+
+Los siete tipos que acepta el control plane, con sus campos:
+
+| `type` | Campos |
+|--------|--------|
+| `tokenLimit` | `count`, `period` (`minute`\|`hour`\|`day`), `counterKey` (`IPAddress`\|`Identity`) |
+| `requestRateLimit` | `callsPerPeriod`, `periodSeconds`, `counterKey` |
+| `costLimit` | `amount`, `period`, `counterKey`, `displayName`, `remainingCostHeaderName` |
+| `contentSafety` | `hateSeverity`, `violenceSeverity`, `sexualSeverity`, `selfHarmSeverity` (`None`\|`Low`\|`Medium`\|`High`) |
+| `ipFilter` | `action` (`Allow`\|`Deny`), `cidrRanges` |
+| `fallback` | `threshold`, `tripDurationSeconds`, `fallbackTargets` |
+| `cors` | `allowedOrigins`, `allowedMethods`, `allowedHeaders`, `exposeHeaders`, `allowCredentials`, `preflightResultMaxAge` |
+
+`counterKey` es **obligatorio** en los tres límites; si falta, la API responde
+`400 requestRateLimit.counterKey is required`.
 
 > ⚠️ Las cabeceras de cuota **cambian de nombre** respecto al SKU clásico:
 > aquí son `remaining-tokens` / `consumed-tokens` (en el clásico, `x-tokens-remaining` /
 > `x-tokens-consumed`), más `remaining-quota-tokens` cuando el periodo es de una hora o más.
 > Cualquier cliente que las lea hay que tocarlo.
 
-### Comprobar que hacen efecto
+### Crearlas y comprobar que hacen efecto
 
-Crearlas no se puede automatizar, pero **verificarlas sí**. El repo trae
-[`aigw-policies-test.ps1`](../scripts/aigw-policies-test.ps1), que lanza contra el gateway el
-tráfico que cada guardarraíl debería frenar y te dice qué pasó:
+[`aigw-setup.ps1`](../scripts/aigw-setup.ps1) las aplica en su paso 6: límite de tokens y
+content safety a los modelos de chat, límite de llamadas a los embeddings y al servidor MCP.
 
 ```powershell
 cd scripts
-./aigw-policies-test.ps1 -GatewayName <gw> -GatewayResourceGroup <rg-gateway>
+./aigw-setup.ps1 -GatewayName <gw> -GatewayResourceGroup <rg-gateway> -TokensPerMinute 10000
 ```
 
 ```
-=== Content safety  (esperado 400 si la politica esta activa) ===
-  [400] BLOQUEADO por el filtro propio de Azure OpenAI (no por el gateway)
-        jailbreak detectado por el filtro del despliegue
+=== 6. Politicas de gobierno ===
+  [200] modelo 'embeddings' -> requestRateLimit
+  [200] modelo 'gpt-4-1-mini' -> tokenLimit, contentSafety
+  [200] modelo 'chat-eu' -> tokenLimit, contentSafety
+  [200] toolserver 'learn' -> requestRateLimit
+```
 
-=== IP filter  (esperado 403 si tu IP no esta permitida) ===
-  Tu IP publica: 20.30.40.50
-  [200] tu IP tiene paso libre
-        Para verlo bloquear: Policies > Add policy > IP filter > Deny 20.30.40.50/32
+Después, [`aigw-policies-test.ps1`](../scripts/aigw-policies-test.ps1) lista lo que hay
+declarado y lanza contra el gateway el tráfico que cada guardarraíl debería frenar. Con `-Demo`
+baja el techo de tokens un momento para que el `429` salte a la segunda petición y lo restaura
+al terminar:
+
+```powershell
+./aigw-policies-test.ps1 -GatewayName <gw> -GatewayResourceGroup <rg-gateway> -Demo
+```
+
+```
+=== Politicas declaradas  (properties.policies de cada asset) ===
+  modelo     embeddings       requestRateLimit
+  modelo     chat             tokenLimit, contentSafety
+  modelo     chat-eu          tokenLimit, contentSafety
+  toolserver learn            requestRateLimit
+  Total: 6 politicas
 
 === Token rate limit / Request rate limit  (esperado 429 + Retry-After) ===
-    1. [200]  remaining-tokens=1832 consumed-tokens=168
-    ...
+  [demo] techo bajado a 10 tokens/minuto en 'chat'
+    1. [200]
+    2. [429]
+       Retry-After: 180
+       { "statusCode": 429, "message": "Token limit is exceeded. Try again in 180 seconds." }
+  [demo] politicas originales restauradas en 'chat'
 ```
 
 > ⚠️ **Un `400` no prueba que la política exista.** El despliegue de Azure OpenAI **ya trae su
@@ -299,8 +347,8 @@ cd scripts
 > toda la flota en vez de despliegue por despliegue.
 
 > El límite de tokens se contabiliza **después** de que responda el modelo, así que con techos
-> altos hacen falta bastantes peticiones para llegar a él. Si no ves el `429`, sube `-BurstSize`
-> o baja el límite en el portal.
+> altos hacen falta bastantes peticiones para llegar a él. Si no ves el `429`, usa `-Demo` o
+> sube `-BurstSize`.
 
 
 ## Paso 5 · Probar
@@ -466,21 +514,20 @@ este orden:
 |---|---|
 | [`aigw-setup.ps1`](../scripts/aigw-setup.ps1) | Comprueba feature flag e identidad, asigna *Foundry User*, crea proveedores, modelos, MCP y telemetría. Idempotente. |
 | [`aigw-test.ps1`](../scripts/aigw-test.ps1) | Prueba de humo: chat, embeddings, MCP `tools/list`, rechazo sin clave. Acaba en tabla de resultados. |
-| [`aigw-policies-test.ps1`](../scripts/aigw-policies-test.ps1) | Sondea qué guardarraíles están activos y muestra las cabeceras de cuota. |
+| [`aigw-policies-test.ps1`](../scripts/aigw-policies-test.ps1) | Lista las políticas declaradas, comprueba su efecto y con `-Demo` fuerza el `429`. |
 | [`aigw-metrics.ps1`](../scripts/aigw-metrics.ps1) | Lee de Application Insights tokens, coste y consumo por clave. |
-| [`aigw-cleanup.ps1`](../scripts/aigw-cleanup.ps1) | Vacía los assets. Necesario para *cambiar* modelos o MCP, que son inmutables. |
+| [`aigw-cleanup.ps1`](../scripts/aigw-cleanup.ps1) | Vacía los assets. Necesario para *cambiar* modelos o MCP, que son inmutables. Con `-Only policies` quita solo los guardarraíles. |
 
 ```powershell
 cd scripts
 ./aigw-setup.ps1        -GatewayName <gw> -GatewayResourceGroup <rg-gateway>
 ./aigw-test.ps1         -GatewayName <gw> -GatewayResourceGroup <rg-gateway>
-./aigw-policies-test.ps1 -GatewayName <gw> -GatewayResourceGroup <rg-gateway>
+./aigw-policies-test.ps1 -GatewayName <gw> -GatewayResourceGroup <rg-gateway> -Demo
 ./aigw-metrics.ps1
 ```
 
-El recorrido completo son unos 3 minutos y deja el gateway montado, probado y con telemetría
-llegando. Las políticas hay que crearlas a mano en el portal (Paso 4) porque no tienen API;
-el resto no requiere tocar el portal en ningún momento.
+El recorrido completo son unos 3 minutos y deja el gateway montado, probado, con políticas
+aplicadas y con telemetría llegando, sin tocar el portal en ningún momento.
 
 
 ---

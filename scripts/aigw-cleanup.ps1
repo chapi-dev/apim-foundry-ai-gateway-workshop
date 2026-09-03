@@ -3,6 +3,7 @@
 #
 #   ./aigw-cleanup.ps1 -GatewayName dev-testing-apim-preview -GatewayResourceGroup ai-gateway-dev-testing-apim-preview
 #   ./aigw-cleanup.ps1 ... -Only models
+#   ./aigw-cleanup.ps1 ... -Only policies    # quita solo los guardrails, deja los assets
 #
 # Hace falta más de lo que parece: los modelos y los servidores MCP son inmutables (un PUT
 # sobre uno existente falla), así que para cambiar cualquier cosa hay que borrar y recrear
@@ -10,7 +11,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$GatewayName,
     [Parameter(Mandatory = $true)][string]$GatewayResourceGroup,
-    [ValidateSet("all", "models", "toolservers", "telemetry")]
+    [ValidateSet("all", "models", "toolservers", "telemetry", "policies")]
     [string]$Only = "all",
     [switch]$Force
 )
@@ -39,12 +40,44 @@ function Remove-Asset {
     Write-Host ("  [{0}] {1}" -f $status, $Label) -ForegroundColor $color
 }
 
+function Clear-Policies {
+    param([string]$Path, [string]$Label)
+    # Las políticas no son un recurso propio: se borran dejando la lista vacía con un PATCH.
+    $body = @{ properties = @{ policies = @() } } | ConvertTo-Json -Depth 6
+    $uri = "$workspace/$Path`?api-version=$apiVersion"
+    $response = Invoke-WebRequest -Uri $uri -Method Patch -Headers $headers -Body $body -SkipHttpErrorCheck
+    # El control plane devuelve a veces un 404 pasajero sobre los toolservers.
+    if ([int]$response.StatusCode -eq 404) {
+        Start-Sleep -Seconds 3
+        $response = Invoke-WebRequest -Uri $uri -Method Patch -Headers $headers -Body $body -SkipHttpErrorCheck
+    }
+    $status = [int]$response.StatusCode
+    $color = if ($status -lt 300) { "Green" } else { "Red" }
+    Write-Host ("  [{0}] {1}" -f $status, $Label) -ForegroundColor $color
+}
+
 Write-Host "Gateway : $GatewayName ($GatewayResourceGroup)"
 Write-Host "Alcance : $Only"
 
 if (-not $Force) {
     $answer = Read-Host "Esto borra los assets del gateway. Escribe 'si' para continuar"
     if ($answer -ne "si") { Write-Host "Cancelado."; exit 0 }
+}
+
+if ($Only -in @("all", "policies")) {
+    Write-Host "`n=== Politicas ===" -ForegroundColor Cyan
+    foreach ($provider in Get-Assets "modelProviders") {
+        foreach ($model in Get-Assets "modelProviders/$($provider.name)/models") {
+            if (@($model.properties.policies).Count) {
+                Clear-Policies "modelProviders/$($provider.name)/models/$($model.name)" "modelo $($model.name)"
+            }
+        }
+    }
+    foreach ($server in Get-Assets "toolservers") {
+        if (@($server.properties.policies).Count) {
+            Clear-Policies "toolservers/$($server.name)" "toolserver $($server.name)"
+        }
+    }
 }
 
 if ($Only -in @("all", "models")) {
@@ -75,8 +108,7 @@ if ($Only -in @("all", "telemetry")) {
 Write-Host "`n=== Estado final ===" -ForegroundColor Cyan
 foreach ($asset in @("modelProviders", "models", "toolservers", "telemetryExporters")) {
     $names = @(Get-Assets $asset | ForEach-Object { $_.name })
-    "{0,-20} {1}" -f $asset, $(if ($names) { $names -join ", " } else { "(vacio)" })
+    Write-Host ("{0,-20} {1}" -f $asset, $(if ($names) { $names -join ", " } else { "(vacio)" }))
 }
 
-Write-Host "`nLas politicas creadas en el portal no se tocan: bórralas desde Policies." -ForegroundColor Yellow
-Write-Host "Para volver a montarlo todo: ./aigw-setup.ps1 -GatewayName $GatewayName -GatewayResourceGroup $GatewayResourceGroup" -ForegroundColor Cyan
+Write-Host "`nPara volver a montarlo todo: ./aigw-setup.ps1 -GatewayName $GatewayName -GatewayResourceGroup $GatewayResourceGroup" -ForegroundColor Cyan
