@@ -7,6 +7,10 @@ clients/litellm/.env
 infra/**/*.json
 !infra/policies/*.json
 
+# Material comercial generado en local (este repo es publico)
+docs/*.docx
+docs/*.xlsx
+
 # Varios
 .DS_Store
 __pycache__/
