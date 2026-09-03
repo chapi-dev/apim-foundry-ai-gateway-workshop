@@ -140,6 +140,10 @@ clásicos (`apis`, `backends`, `products`, `namedValues`, `subscriptions`, `poli
 > (`A model with deployment.modelName '<x>' already exists`) y el toolserver responde
 > `404 Api not found`. Para cambiar cualquier cosa hay que **borrar y volver a crear**.
 > Por eso el repo trae un [`aigw-cleanup.ps1`](../scripts/aigw-cleanup.ps1).
+>
+> Con el toolserver además hay que tener cuidado: ese `PUT` fallido **sí llega a tocarlo**, y lo
+> deja federando **cero herramientas** mientras sigue respondiendo `200`. Si `tools/list` te
+> devuelve una lista vacía, bórralo y recréalo.
 
 Un proveedor Foundry se describe así (`api-version=2025-09-01-preview`; las versiones
 posteriores que cita la doc, incluida `2026-05-01-preview`, todavía no responden):

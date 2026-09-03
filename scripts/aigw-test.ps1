@@ -138,7 +138,14 @@ foreach ($server in $toolservers) {
         $text = $response.Content
         $json = if ($text -match '(?m)^data:\s*(\{.*\})') { $Matches[1] } else { $text }
         $tools = ($json | ConvertFrom-Json).result.tools
-        Add-Result "mcp '$($server.name)' tools/list" $status $true "$($tools.Count) herramientas: $(($tools | ForEach-Object { $_.name }) -join ', ')"
+        # Un PUT fallido sobre un toolserver lo deja a medias: responde 200 pero federa 0
+        # herramientas. Por eso la lista vacía cuenta como fallo, no como éxito.
+        $count = @($tools).Count
+        if ($count -gt 0) {
+            Add-Result "mcp '$($server.name)' tools/list" $status $true "$count herramientas: $(($tools | ForEach-Object { $_.name }) -join ', ')"
+        } else {
+            Add-Result "mcp '$($server.name)' tools/list" $status $false "0 herramientas: borra y recrea el toolserver con ./aigw-cleanup.ps1 -Only toolservers"
+        }
     } else {
         Add-Result "mcp '$($server.name)' tools/list" $status $false $response.Content
     }
