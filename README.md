@@ -14,20 +14,38 @@ e identidad administrada — sin claves en el cliente.
 ## 🗺️ Arquitectura
 
 ```
-  GitHub Copilot CLI / gh ──(OpenAI)──┐
-  OpenAI SDK (Python/Node) ─(OpenAI)──┤
-                                      ├──► APIM ──(Managed Identity, keyless)──► Azure AI Foundry
-  Claude Code ─(Anthropic)─► LiteLLM ─┘     │                                   ├─ chat  (gpt-4.1-mini) ×2 backends
-                             (traduce)      │                                   └─ embeddings (text-embedding-3-small)
-                                            │
-                                    Application Insights    ◄─ métricas de tokens/coste
-                                    Azure Managed Redis     ◄─ semantic cache
-                                    Azure AI Content Safety ◄─ jailbreak / prompt shield
+  GitHub Copilot CLI / gh ──(OpenAI)────┐
+  OpenAI SDK (Python/Node) ─(OpenAI)────┤
+  Claude Code ─(Anthropic)──────────────┤  ◄─ APIM traduce el protocolo (lab 12)
+                                        ├──► APIM ──(Managed Identity, keyless)──► Azure AI Foundry
+  Claude Code ─(Anthropic)─► LiteLLM ───┘     │                                   ├─ chat  (gpt-4.1-mini) ×2 backends
+      (opcional, lab 08)     (traduce)        │                                   └─ embeddings (text-embedding-3-small)
+                                              │
+                                      Application Insights    ◄─ métricas de tokens/coste
+                                      Azure Managed Redis     ◄─ semantic cache
+                                      Azure AI Content Safety ◄─ jailbreak / prompt shield
 ```
 
-Todos los clientes convergen en el **mismo endpoint compatible con Azure OpenAI** expuesto por
-APIM. Claude Code habla protocolo Anthropic, así que usa **LiteLLM** como puente que traduce a
-OpenAI y reenvía a APIM.
+Todos los clientes convergen en el **mismo endpoint expuesto por APIM**. El caso interesante es
+Claude Code: habla protocolo **Anthropic** y Foundry habla **OpenAI**, así que alguien tiene que
+traducir. Lo habitual es meter **LiteLLM** en medio — un contenedor más que desplegar, operar y
+securizar. **No hace falta: la traducción cabe en la política de APIM**
+([lab 12](labs/12-claude-code-sin-litellm.md)), y así el gateway que ya tienes es el único salto.
+
+### ¿Hace falta LiteLLM?
+
+| | **APIM traduce** ([lab 12](labs/12-claude-code-sin-litellm.md)) | **LiteLLM traduce** ([lab 08](labs/08-cliente-claude-code.md)) |
+|---|---|---|
+| Piezas que operas | **ninguna extra** | contenedor + su ciclo de vida |
+| Saltos de red | Claude Code → APIM → Foundry | Claude Code → LiteLLM → APIM → Foundry |
+| Credenciales | **una** (la de APIM) | dos (master key de LiteLLM + la de APIM) |
+| Gobierno (tokens, balanceo, métricas) | nativo, misma API y producto | nativo, pero el proxy queda **fuera** del gateway |
+| Proveedores soportados | los de Foundry | **~100** (Bedrock, Vertex, Cohere…) |
+| *Streaming* | se **sintetiza** al final de la respuesta | **token a token** real |
+
+> **En corto:** si tus modelos están en Foundry, LiteLLM es una pieza móvil que no aporta nada
+> que APIM no haga ya. Sigue mereciendo la pena si necesitas *streaming* token a token o modelos
+> de otros proveedores cloud — por eso el lab 08 se mantiene en el workshop.
 
 ---
 
@@ -36,11 +54,14 @@ OpenAI y reenvía a APIM.
 ### A. Herramienta del desarrollador (cómo consumen los modelos)
 | Opción | Protocolo | Ruta | Lab |
 |--------|-----------|------|-----|
-| **Claude Code** ("cloud code") | Anthropic | Claude Code → LiteLLM → APIM → Foundry | [08](labs/08-cliente-claude-code.md) |
+| **Claude Code sin LiteLLM** ⭐ | Anthropic | Claude Code → APIM (traduce) → Foundry (OpenAI) | [12](labs/12-claude-code-sin-litellm.md) |
 | **Claude Code → Claude nativo** | Anthropic | Claude Code → APIM → Foundry (Claude) | [11](labs/11-claude-en-foundry.md) |
+| **Claude Code con LiteLLM** | Anthropic | Claude Code → LiteLLM → APIM → Foundry | [08](labs/08-cliente-claude-code.md) |
 | **GitHub Copilot CLI + `gh`** | — | Copilot nativo + `gh copilot` en terminal | [09](labs/09-cliente-copilot-cli.md) |
 | **OpenAI SDK genérico** | OpenAI | App → APIM → Foundry | [01](labs/01-desplegar-y-primera-llamada.md) |
 | **Foundry directo** (línea base) | OpenAI | App → Foundry (sin gobierno) | comparativa |
+
+⭐ = ruta recomendada: sin contenedor intermedio.
 
 ### B. APIM como AI Gateway (el núcleo)
 | Módulo | Política | Lab |
@@ -53,14 +74,21 @@ OpenAI y reenvía a APIM.
 | Managed Identity (keyless) | `authentication-managed-identity` | [07](labs/07-managed-identity.md) |
 | Gobierno de **MCP** | exponer/gobernar servidores MCP | [10](labs/10-mcp.md) |
 
+### C. Alternativa: el SKU *AI Gateway* (preview)
+Existe un tier nuevo de APIM específico para tráfico de IA, donde los modelos, las herramientas
+MCP y las políticas se configuran **sin escribir XML**. Gana en MCP (conectores integrados,
+OpenAPI→tools) y pierde caché semántica y balanceo. Comparativa y matriz de portabilidad en el
+[lab 13](labs/13-ai-gateway-tier.md).
+
 ---
 
 ## ✅ Requisitos previos
 
 - Suscripción de Azure con permisos de Colaborador + capacidad de asignar roles.
 - [Azure CLI](https://learn.microsoft.com/cli/azure/) con la extensión Bicep (`az bicep version`).
+- **PowerShell 7+** (`pwsh`): los labs y scripts están escritos para él.
 - [GitHub CLI](https://cli.github.com/) (`gh auth status`).
-- [Docker](https://www.docker.com/) (para el puente LiteLLM de Claude Code).
+- [Docker](https://www.docker.com/) — **solo** para el puente LiteLLM del [lab 08](labs/08-cliente-claude-code.md); la ruta recomendada ([lab 12](labs/12-claude-code-sin-litellm.md)) no lo necesita.
 - Python 3.10+ (para los scripts de prueba).
 
 ---
@@ -143,8 +171,8 @@ Al terminar (limpieza segura):
 ## 📁 Estructura
 
 ```
-infra/        Bicep del núcleo + políticas XML (aplicadas y snippets de labs)
-labs/         Guías paso a paso (00 → 11) + guión de demo
-clients/      LiteLLM (Claude Code), pruebas OpenAI SDK / HTTP
+infra/        Bicep del núcleo + políticas XML (el puente Anthropic→OpenAI vive aquí)
+labs/         Guías paso a paso (00 → 13) + guión de demo (consola y portal)
+clients/      Pruebas OpenAI SDK / HTTP + LiteLLM (opcional, lab 08)
 scripts/      deploy / get-keys / cleanup
 ```

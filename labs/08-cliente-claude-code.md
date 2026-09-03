@@ -13,6 +13,11 @@ Claude Code ──(Anthropic)──► LiteLLM ──(OpenAI, api-key = clave AP
 Ventaja: **todo el gobierno** (límites, métricas, balanceo, seguridad) se aplica igual que a
 cualquier otro cliente.
 
+> **Antes de desplegar nada:** este contenedor **es opcional**. APIM puede hacer esa misma
+> traducción en su política, sin pieza intermedia — ver [lab 12](12-claude-code-sin-litellm.md).
+> Este lab sigue siendo la opción buena si necesitas *streaming* token a token o modelos de
+> proveedores que no están en Foundry (Bedrock, Vertex…). Para todo lo demás, ve al lab 12.
+
 ## Pasos
 
 1. **Configurar el puente**
@@ -49,6 +54,8 @@ cualquier otro cliente.
 - Para producción despliega LiteLLM como **Azure Container App** en lugar de local.
 - Alternativa nativa: si el cliente usa modelos **Claude reales**, Claude Code puede ir directo;
   aquí el objetivo es **reutilizar los modelos de Foundry** de forma gobernada. Ver [Lab 11](11-claude-en-foundry.md).
+- Alternativa **sin contenedor**: la traducción Anthropic ↔ OpenAI también puede hacerla la propia
+  política de APIM, con los mismos modelos de este lab. Ver [Lab 12](12-claude-code-sin-litellm.md).
 
 ## Siguiente
 ➡️ [Lab 09 · GitHub Copilot CLI + gh](09-cliente-copilot-cli.md)
