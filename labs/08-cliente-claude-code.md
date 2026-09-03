@@ -42,9 +42,13 @@ cualquier otro cliente.
 ## Notas
 - `drop_params: true` en `config.yaml` descarta campos Anthropic (p.ej. `thinking`) que la API
   OpenAI no acepta.
+- Aquí LiteLLM es un **traductor de protocolo del lado del cliente**, no el gateway: la identidad,
+  las cuotas, las métricas y la seguridad se siguen aplicando en APIM. Si surge *"¿y por qué no
+  usar LiteLLM como gateway?"*, la respuesta corta es que sería sustituir un PaaS con SLA por un
+  proxy que tendrías que operar tú junto con PostgreSQL y Redis.
 - Para producción despliega LiteLLM como **Azure Container App** en lugar de local.
 - Alternativa nativa: si el cliente usa modelos **Claude reales**, Claude Code puede ir directo;
-  aquí el objetivo es **reutilizar los modelos de Foundry** de forma gobernada.
+  aquí el objetivo es **reutilizar los modelos de Foundry** de forma gobernada. Ver [Lab 11](11-claude-en-foundry.md).
 
 ## Siguiente
 ➡️ [Lab 09 · GitHub Copilot CLI + gh](09-cliente-copilot-cli.md)

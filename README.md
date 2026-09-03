@@ -14,15 +14,15 @@ e identidad administrada — sin claves en el cliente.
 ## 🗺️ Arquitectura
 
 ```
-  GitHub Copilot CLI / gh ─(OpenAI)─┐
-  OpenAI SDK (Python/Node) ─(OpenAI)─┤
-                                     ├──► APIM  ──(Managed Identity, keyless)──►  Azure AI Foundry
-  Claude Code ─(Anthropic)─► LiteLLM ┘     │                                       ├─ chat  (gpt-4.1-mini) x2 backends
-                             (traduce)      │                                       └─ embeddings (text-embedding-3-small)
+  GitHub Copilot CLI / gh ──(OpenAI)──┐
+  OpenAI SDK (Python/Node) ─(OpenAI)──┤
+                                      ├──► APIM ──(Managed Identity, keyless)──► Azure AI Foundry
+  Claude Code ─(Anthropic)─► LiteLLM ─┘     │                                   ├─ chat  (gpt-4.1-mini) ×2 backends
+                             (traduce)      │                                   └─ embeddings (text-embedding-3-small)
                                             │
-                                   Application Insights  ◄─ métricas de tokens/coste
-                                   Azure Managed Redis   ◄─ semantic cache
-                                   Azure AI Content Safety ◄─ jailbreak / prompt shield
+                                    Application Insights    ◄─ métricas de tokens/coste
+                                    Azure Managed Redis     ◄─ semantic cache
+                                    Azure AI Content Safety ◄─ jailbreak / prompt shield
 ```
 
 Todos los clientes convergen en el **mismo endpoint compatible con Azure OpenAI** expuesto por
@@ -112,8 +112,6 @@ sobre los Foundry.
 
 ---
 
-Después, sigue los [labs](labs/) en orden.
-
 > 🎬 **¿Vas a presentar en directo?** Usa el [**guión de demo** (`labs/DEMO.md`)](labs/DEMO.md):
 > secuencia lista con comandos copy-paste apuntando al gateway ya desplegado, tiempos y qué
 > resaltar en cada acto.
@@ -146,7 +144,7 @@ Al terminar (limpieza segura):
 
 ```
 infra/        Bicep del núcleo + políticas XML (aplicadas y snippets de labs)
-labs/         Guías paso a paso (00 → 10)
+labs/         Guías paso a paso (00 → 11) + guión de demo
 clients/      LiteLLM (Claude Code), pruebas OpenAI SDK / HTTP
 scripts/      deploy / get-keys / cleanup
 ```
