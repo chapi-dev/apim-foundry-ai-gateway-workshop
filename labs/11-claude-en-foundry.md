@@ -77,9 +77,10 @@ Prueba directa (clave de la cuenta):
 
 ```powershell
 $key = az cognitiveservices account keys list -n aigwqyxvxaoai1 -g rg-apim-workshop --query key1 -o tsv
+$body = '{"model":"claude-haiku","max_tokens":100,"messages":[{"role":"user","content":"Hola en una frase"}]}'
 curl -s -X POST "https://aigwqyxvxaoai1.services.ai.azure.com/anthropic/v1/messages" `
   -H "x-api-key: $key" -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" `
-  -d '{\"model\":\"claude-haiku\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"Hola en una frase\"}]}'
+  --data-raw $body
 ```
 
 ---
@@ -124,9 +125,14 @@ Como el protocolo es Anthropic de extremo a extremo, Claude Code va directo a AP
 
 ```powershell
 $env:ANTHROPIC_BASE_URL="https://apim-aigw-dev-01.azure-api.net/anthropic"
-$env:ANTHROPIC_AUTH_TOKEN="<clave-de-suscripcion-APIM>"   # NO una clave de Anthropic
+$env:ANTHROPIC_API_KEY="<clave-de-suscripcion-APIM>"   # NO una clave de Anthropic
 claude
 ```
+
+> Configura la API de APIM para aceptar la clave de suscripción en la cabecera **`x-api-key`**
+> (`subscriptionKeyParameterNames.header`), que es la nativa de Anthropic. Así vale
+> `ANTHROPIC_API_KEY`; `ANTHROPIC_AUTH_TOKEN` enviaría `Authorization: Bearer …`, que APIM no
+> interpreta como clave de suscripción.
 
 Sin contenedor, sin traducción, sin puerto 4000. Todo el tráfico queda gobernado por APIM
 (límites, métricas de tokens, identidad keyless) igual que el resto de APIs.
@@ -137,11 +143,18 @@ Sin contenedor, sin traducción, sin puerto 4000. Todo el tráfico queda goberna
 
 | Escenario | ¿LiteLLM? | Por qué |
 |-----------|-----------|---------|
-| Claude Code sobre modelos **OpenAI** (gpt-4.1-mini…) | **Sí** | Traducir Anthropic ↔ OpenAI |
+| Claude Code sobre modelos **OpenAI** (gpt-4.1-mini…) | **Opcional** | Hay que traducir Anthropic ↔ OpenAI, pero puede hacerlo la política de APIM → [Lab 12](12-claude-code-sin-litellm.md) |
 | Claude Code sobre **Claude nativo** en Foundry | **No** | Mismo protocolo de punta a punta |
 | Cualquier app con SDK de **OpenAI** | **No** | Ya habla OpenAI → directo a APIM |
 | GitHub Copilot CLI | **No** | Modelos gestionados por GitHub |
 
-**Guía de decisión:** LiteLLM permite reutilizar modelos **OpenAI** desde clientes Anthropic
-(como Claude Code) sin cambios. Si el cliente quiere **Claude**, se despliega Claude nativo en
-Foundry y Claude Code apunta **directamente** a APIM, prescindiendo de LiteLLM.
+**Guía de decisión:** si el cliente quiere **Claude**, se despliega Claude nativo en Foundry y
+Claude Code apunta **directamente** a APIM (este lab). Si quiere reutilizar sus modelos **OpenAI**
+desde un cliente Anthropic, la traducción puede vivir en el gateway ([lab 12](12-claude-code-sin-litellm.md))
+en lugar de en un LiteLLM que haya que operar; LiteLLM sigue siendo la opción cuando hace falta
+*streaming* real token a token o una cartera muy amplia de proveedores.
+
+---
+
+## Siguiente
+➡️ [Lab 12 · Claude Code sobre modelos OpenAI, sin LiteLLM](12-claude-code-sin-litellm.md)
