@@ -9,6 +9,9 @@ las herramientas MCP y las políticas se declaran como **objetos de configuraci�
 > Es un **capítulo alternativo** del workshop, no un sustituto de los labs clásicos.
 > Para producción hoy, el camino soportado sigue siendo el SKU clásico (v2).
 
+Todo lo de este lab está automatizado en [`scripts/aigw-*.ps1`](../scripts/) salvo las políticas,
+que en preview solo existen en el portal. Si quieres ir al grano, salta a [Scripts](#scripts).
+
 ---
 
 ## En qué se diferencia del APIM clásico
@@ -32,7 +35,7 @@ implementar**. No hay una vía de escape a XML.
 |-----|-----------|-----------|------|
 | [01](01-desplegar-y-primera-llamada.md) | Primera llamada gobernada | ✅ | `Add models` + runtime access key |
 | [02](02-token-limit.md) | Límite de tokens | ✅ | Política *Token rate limit*: por minuto, **hora o día** |
-| [03](03-metricas-y-costes.md) | Métricas y coste | ⚠️ | Solo métrica OTel `gen_ai_client_token_usage`; **sin dimensiones propias** |
+| [03](03-metricas-y-costes.md) | Métricas y coste | ✅ | Métrica OTel de tokens **y otra de coste en USD**, con modelo, tipo de token y clave de runtime |
 | [04](04-balanceo-y-failover.md) | Balanceo / failover | ❌ | La API exige que `deployment.modelName` sea **único por workspace**: dos Foundry con un despliegue `chat` no pueden convivir |
 | [05](05-semantic-cache.md) | Caché semántica | ❌ | No existe como política en preview |
 | [06](06-content-safety.md) | Content safety / jailbreak | ✅ | Política *Content safety*, con Prompt Shields y blocklists |
@@ -127,8 +130,16 @@ clásicos (`apis`, `backends`, `products`, `namedValues`, `subscriptions`, `poli
 .../service/<gw>/workspaces/default/modelProviders/<p>/models
 .../service/<gw>/workspaces/default/models                   # solo lectura, agregado
 .../service/<gw>/workspaces/default/toolservers
+.../service/<gw>/workspaces/default/telemetryExporters
+.../service/<gw>/workspaces/default/agents                   # responde 200, vacío en preview
 .../service/<gw>/apikeys                                     # ojo: a nivel de servicio
 ```
+
+> ⚠️ **Los modelos y los servidores MCP son inmutables.** Un `PUT` sobre uno que ya existe no
+> lo actualiza: el modelo choca con su propia comprobación de unicidad
+> (`A model with deployment.modelName '<x>' already exists`) y el toolserver responde
+> `404 Api not found`. Para cambiar cualquier cosa hay que **borrar y volver a crear**.
+> Por eso el repo trae un [`aigw-cleanup.ps1`](../scripts/aigw-cleanup.ps1).
 
 Un proveedor Foundry se describe así (`api-version=2025-09-01-preview`; las versiones
 posteriores que cita la doc, incluida `2026-05-01-preview`, todavía no responden):
@@ -146,6 +157,20 @@ Y un modelo, donde `supportedEndpoints` son **rutas relativas** y `modelName` es
 ```json
 { "properties": { "supportedEndpoints": [ "/chat/completions" ],
   "deployment": { "modelName": "chat", "resourceId": "/subscriptions/.../accounts/<cuenta>" } } }
+```
+
+`supportedEndpoints` se corresponde con lo que el asistente ofrece como *OpenAI chat
+completions* (`/chat/completions`), *OpenAI responses* (`/responses`) y *Anthropic messages*.
+El campo **no está validado** por la API —acepta cualquier cadena que empiece por `/`— pero el
+runtime sí comprueba que el backend hable ese formato, así que declarar de más no sirve de nada.
+
+Y un exportador de telemetría:
+
+```json
+{ "properties": { "displayName": "App Insights", "kind": "ApplicationInsights",
+  "metrics": true,
+  "applicationInsights": { "connectionString": "InstrumentationKey=...",
+                           "resourceId": "/subscriptions/.../components/<appi>" } } }
 ```
 
 Un servidor MCP usa `type` (no `kind`), con valores `Mcp`, `OpenApi` o `Connector`, y cada
@@ -190,25 +215,89 @@ az rest --method post --url "https://management.azure.com$svc/apikeys/master/lis
 
 ## Paso 4 · Políticas
 
-**Policies →** cuatro tipos, aplicables al gateway entero o a un asset concreto:
+**Policies → Add policy →** el asistente tiene tres pasos: **Type** (qué guardarraíl),
+**Assets** (a qué modelos o MCP se aplica) y **Configure** (los campos, ya validados).
+No hay XML ni expresiones.
 
-| Política | Efecto | Equivalente clásico |
-|----------|--------|---------------------|
-| **Token rate limit** | `429` al superar tokens por minuto/hora/día | `llm-token-limit` |
-| **Request rate limit** | `429` por número de peticiones | `rate-limit-by-key` |
-| **Content safety** | `400` con Prompt Shields y blocklists | `llm-content-safety` |
-| **IP filter** | `403` fuera de la lista permitida | `ip-filter` |
+| Política | Efecto | Aplica a | Equivalente clásico |
+|----------|--------|----------|---------------------|
+| **Content safety** | `400` con Prompt Shields y blocklists | modelos y MCP | `llm-content-safety` |
+| **IP filter** | `403` fuera de la lista permitida | modelos y MCP | `ip-filter` |
+| **Token rate limit** | `429` + `Retry-After` al superar tokens | **solo modelos** | `llm-token-limit` |
+| **Request rate limit** | `429` + `Retry-After` por nº de peticiones | modelos y MCP | `rate-limit-by-key` |
 
-El contador de *Token rate limit* se reparte por **identidad del llamante** o por **IP**.
+Cuando aplican varias, el gateway **las evalúa todas** antes de llamar al backend; si una
+bloquea, corta y devuelve el error sin gastar tokens del modelo.
+
+Cómo configurar cada una:
+
+1. **Content safety** — necesita un recurso de **Azure AI Content Safety**, que se elige como
+   backend en *Configure*. Umbrales por categoría (odio, sexual, violencia, autolesión) con
+   **4 u 8 niveles** de severidad, **Prompt Shields** para jailbreak e inyección indirecta, y
+   **blocklists** de términos propios (nombres de competidores, por ejemplo). Se puede poner en
+   **solo-log**: empieza así, calibra con tráfico real y luego pásalo a bloquear.
+2. **IP filter** — rangos CIDR IPv4/IPv6 en lista de permitidos o denegados. Combínalo con la
+   runtime access key: la clave autentica, la IP pone la frontera de red.
+3. **Token rate limit** — tokens (prompt + completion) por **minuto, hora o día**, contados por
+   **identidad del llamante** o por **IP**.
+4. **Request rate limit** — número de llamadas en una ventana configurable (30 s, 1, 2 o 5 min).
+
+Para que el reparto por identidad sirva de algo, **crea una clave por aplicación**: en preview
+la clave es de ámbito gateway, así que es la única forma de separar presupuestos y atribuir
+consumo.
 
 > Las políticas **solo se configuran por portal** en preview. La doc dice que en el control plane
 > cada política es un objeto JSON, pero en `2025-09-01-preview` no hay recurso ARM que las
 > exponga: `policies` devuelve `400 Method not allowed in AIGateway pricing tier` y el resto de
-> nombres, `404`. Modelos y MCP sí son automatizables; las políticas, todavía no.
+> nombres —`guardrails`, `governancePolicies`, `aiPolicies`…— `404`. Tampoco aparece ninguna
+> operación de política en el catálogo del proveedor. Modelos, MCP y telemetría sí son
+> automatizables; las políticas, todavía no.
 
 > ⚠️ Las cabeceras de cuota **cambian de nombre** respecto al SKU clásico:
 > aquí son `remaining-tokens` / `consumed-tokens` (en el clásico, `x-tokens-remaining` /
-> `x-tokens-consumed`). Cualquier cliente que las lea hay que tocarlo.
+> `x-tokens-consumed`), más `remaining-quota-tokens` cuando el periodo es de una hora o más.
+> Cualquier cliente que las lea hay que tocarlo.
+
+### Comprobar que hacen efecto
+
+Crearlas no se puede automatizar, pero **verificarlas sí**. El repo trae
+[`aigw-policies-test.ps1`](../scripts/aigw-policies-test.ps1), que lanza contra el gateway el
+tráfico que cada guardarraíl debería frenar y te dice qué pasó:
+
+```powershell
+cd scripts
+./aigw-policies-test.ps1 -GatewayName <gw> -GatewayResourceGroup <rg-gateway>
+```
+
+```
+=== Content safety  (esperado 400 si la politica esta activa) ===
+  [400] BLOQUEADO por el filtro propio de Azure OpenAI (no por el gateway)
+        jailbreak detectado por el filtro del despliegue
+
+=== IP filter  (esperado 403 si tu IP no esta permitida) ===
+  Tu IP publica: 20.30.40.50
+  [200] tu IP tiene paso libre
+        Para verlo bloquear: Policies > Add policy > IP filter > Deny 20.30.40.50/32
+
+=== Token rate limit / Request rate limit  (esperado 429 + Retry-After) ===
+    1. [200]  remaining-tokens=1832 consumed-tokens=168
+    ...
+```
+
+> ⚠️ **Un `400` no prueba que la política exista.** El despliegue de Azure OpenAI **ya trae su
+> propio filtro de contenido**, y también responde `400`. Se distinguen por el cuerpo: el del
+> modelo trae `ResponsibleAIPolicyViolation` y el detalle `content_filter_result`. El script lo
+> separa por ti.
+>
+> Entonces, ¿qué aporta la política del gateway si el modelo ya filtra? Tres cosas: se aplica
+> **igual a modelos que no filtran** (Bedrock, Vertex, un endpoint propio) y **a las tools MCP**,
+> añade **blocklists propias** y **modo solo-log**, y queda **auditable en un solo sitio** para
+> toda la flota en vez de despliegue por despliegue.
+
+> El límite de tokens se contabiliza **después** de que responda el modelo, así que con techos
+> altos hacen falta bastantes peticiones para llegar a él. Si no ves el `429`, sube `-BurstSize`
+> o baja el límite en el portal.
+
 
 ## Paso 5 · Probar
 
@@ -234,6 +323,23 @@ Invoke-RestMethod -Uri "$g/default/models/openai/v1/embeddings" -Method POST `
 Fíjate en la ruta: el prefijo **`/default/models`** es fijo, y `openai/v1` es el *formato* de la
 API, no el proveedor — Foundry, Azure OpenAI, Bedrock, Vertex y OpenAI comparten ese camino y se
 distinguen por el campo `model`.
+
+Para no ir una por una, [`aigw-test.ps1`](../scripts/aigw-test.ps1) recorre todas las superficies
+—chat de cada modelo, embeddings, MCP y el rechazo sin clave— y acaba en una tabla:
+
+```powershell
+cd scripts
+./aigw-test.ps1 -GatewayName <gw> -GatewayResourceGroup <rg-gateway>
+```
+
+```
+Prueba                  HTTP OK Detalle
+chat 'chat'              200 si 14 tokens, backend gpt-4.1-mini-2025-04-14
+chat 'chat-eu'           200 si 14 tokens, backend gpt-4.1-mini-2025-04-14
+embeddings 'embeddings'  200 si vector de 1536 dimensiones
+mcp 'learn' tools/list   200 si 3 herramientas: microsoft_docs_search, ...
+peticion sin api-key     401 si rechazada, correcto
+```
 
 ## Paso 6 · MCP
 
@@ -263,12 +369,115 @@ y `microsoft_docs_fetch`— servidas ya por tu gateway y con tu clave, no con la
 
 ## Paso 7 · Observabilidad
 
-El gateway emite la métrica OpenTelemetry **`gen_ai_client_token_usage`** hacia Application
-Insights u otro destino OTLP.
+**Monitoring →** eliges destino: **Application Insights** o cualquier colector **OTLP**
+(Datadog, Splunk, Grafana Cloud). Con App Insights el portal añade además un panel de consumo
+de tokens ya montado.
 
-> ⚠️ Se consulta con **PromQL**, no con KQL. Las consultas del [lab 03](03-metricas-y-costes.md)
-> no valen aquí. El tráfico de tools MCP sí se ve en el portal vía App Insights, pero todavía
-> **no** se exporta por OTLP.
+Esto sí tiene API, y es lo que configura [`aigw-setup.ps1`](../scripts/aigw-setup.ps1):
+
+```
+.../service/<gw>/workspaces/default/telemetryExporters/<nombre>
+```
+
+> ⚠️ **`tracing` solo vale para exportadores OpenTelemetry.** Si creas uno de tipo
+> `ApplicationInsights` con `tracing: true`, la API responde
+> `Tracing is currently supported only for OpenTelemetry telemetry exporters`. Con App Insights,
+> deja `metrics: true` y `tracing` sin tocar.
+
+### Qué llega y cómo consultarlo
+
+La documentación llama a la métrica `gen_ai_client_token_usage` porque así se ve **desde
+PromQL**. Dentro de Application Insights aterriza en `customMetrics` con otro nombre:
+
+| Métrica en `customMetrics` | Qué es |
+|---|---|
+| `azure.ai_gateway.client.token.usage` | tokens consumidos |
+| `azure.ai_gateway.client.token.cost` | **coste estimado**, con `azure.ai_gateway.currency` |
+
+La de coste no aparece en la documentación, pero se emite: trae divisa y un
+`azure.ai_gateway.price_missing` que marca los tipos de token para los que no hay tarifa.
+
+Cada muestra viene con las convenciones semánticas de OpenTelemetry más las propias de Azure:
+
+| Dimensión | Para qué sirve |
+|---|---|
+| `gen_ai.request.model` | lo que pidió el cliente (el nombre del **despliegue**) |
+| `gen_ai.response.model` | el modelo real que respondió — comparado con el anterior, enseña el enrutado |
+| `gen_ai.token.type` | `prompt_tokens`, `completion_tokens`, `total_tokens`, cacheados, razonamiento… |
+| `gen_ai.operation.name` | `chat`, `responses`… |
+| `azure.ai_gateway.api_key_id` | **qué clave de runtime lo consumió** → atribución por aplicación |
+
+Es decir: con una clave por aplicación tienes repartición de consumo y de coste sin tocar nada
+más. [`aigw-metrics.ps1`](../scripts/aigw-metrics.ps1) saca todo eso por consola:
+
+```powershell
+cd scripts
+./aigw-metrics.ps1              # últimas 3 h
+./aigw-metrics.ps1 -Hours 24
+```
+
+```
+=== Tokens por modelo ===
+modelo     backend                 completion_tokens prompt_tokens total_tokens
+chat       gpt-4.1-mini-2025-04-14               207           144          351
+chat-eu    gpt-4.1-mini-2025-04-14               124            72          196
+embeddings text-embedding-3-small                  0            16           16
+
+=== Consumo por clave de runtime ===
+clave  modelo     tokens llamadas
+master chat          351       10
+master chat-eu       196        5
+```
+
+La consulta de fondo es KQL normal sobre `customMetrics`:
+
+```kusto
+customMetrics
+| where name == "azure.ai_gateway.client.token.usage"
+| extend modelo = tostring(customDimensions["gen_ai.request.model"]),
+         tipo   = tostring(customDimensions["gen_ai.token.type"])
+| where tipo == "total_tokens"
+| summarize tokens = sum(valueSum) by modelo
+```
+
+Y la misma métrica desde PromQL, si tu destino es un colector OTLP:
+
+```promql
+sum by (gen_ai_request_model) (gen_ai_client_token_usage)
+```
+
+> El tráfico de tools MCP se ve en el portal a través de App Insights, pero **no** se exporta
+> por OTLP: en preview solo viaja la métrica de tokens. Y no todos los backends reportan
+> tokens —algunos los omiten en streaming o en passthrough—: trátalo como *dato no disponible*,
+> no como cero.
+
+---
+
+## Scripts
+
+Todo lo automatizable de este lab está en [`scripts/`](../scripts/), pensado para lanzarse en
+este orden:
+
+| Script | Qué hace |
+|---|---|
+| [`aigw-setup.ps1`](../scripts/aigw-setup.ps1) | Comprueba feature flag e identidad, asigna *Foundry User*, crea proveedores, modelos, MCP y telemetría. Idempotente. |
+| [`aigw-test.ps1`](../scripts/aigw-test.ps1) | Prueba de humo: chat, embeddings, MCP `tools/list`, rechazo sin clave. Acaba en tabla de resultados. |
+| [`aigw-policies-test.ps1`](../scripts/aigw-policies-test.ps1) | Sondea qué guardarraíles están activos y muestra las cabeceras de cuota. |
+| [`aigw-metrics.ps1`](../scripts/aigw-metrics.ps1) | Lee de Application Insights tokens, coste y consumo por clave. |
+| [`aigw-cleanup.ps1`](../scripts/aigw-cleanup.ps1) | Vacía los assets. Necesario para *cambiar* modelos o MCP, que son inmutables. |
+
+```powershell
+cd scripts
+./aigw-setup.ps1        -GatewayName <gw> -GatewayResourceGroup <rg-gateway>
+./aigw-test.ps1         -GatewayName <gw> -GatewayResourceGroup <rg-gateway>
+./aigw-policies-test.ps1 -GatewayName <gw> -GatewayResourceGroup <rg-gateway>
+./aigw-metrics.ps1
+```
+
+El recorrido completo son unos 3 minutos y deja el gateway montado, probado y con telemetría
+llegando. Las políticas hay que crearlas a mano en el portal (Paso 4) porque no tienen API;
+el resto no requiere tocar el portal en ningún momento.
+
 
 ---
 

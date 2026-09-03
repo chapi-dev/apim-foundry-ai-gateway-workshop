@@ -78,7 +78,16 @@ securizar. **No hace falta: la traducción cabe en la política de APIM**
 Existe un tier nuevo de APIM específico para tráfico de IA, donde los modelos, las herramientas
 MCP y las políticas se configuran **sin escribir XML**. Gana en MCP (conectores integrados,
 OpenAPI→tools) y pierde caché semántica y balanceo. Comparativa y matriz de portabilidad en el
-[lab 13](labs/13-ai-gateway-tier.md).
+[lab 13](labs/13-ai-gateway-tier.md), que trae **scripts para montarlo, probarlo y medirlo**
+de punta a punta:
+
+```powershell
+cd scripts
+./aigw-setup.ps1         -GatewayName <gw> -GatewayResourceGroup <rg>   # modelos, MCP, telemetría
+./aigw-test.ps1          -GatewayName <gw> -GatewayResourceGroup <rg>   # prueba de humo
+./aigw-policies-test.ps1 -GatewayName <gw> -GatewayResourceGroup <rg>   # qué guardarraíles frenan
+./aigw-metrics.ps1                                                      # tokens y coste reales
+```
 
 ---
 
@@ -174,5 +183,5 @@ Al terminar (limpieza segura):
 infra/        Bicep del núcleo + políticas XML (el puente Anthropic→OpenAI vive aquí)
 labs/         Guías paso a paso (00 → 13) + guión de demo (consola y portal)
 clients/      Pruebas OpenAI SDK / HTTP + LiteLLM (opcional, lab 08)
-scripts/      deploy / get-keys / cleanup
+scripts/      deploy / get-keys / cleanup, y aigw-* para el SKU AI Gateway (lab 13)
 ```
