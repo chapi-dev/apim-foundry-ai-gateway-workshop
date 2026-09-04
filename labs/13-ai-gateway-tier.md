@@ -12,6 +12,12 @@ las herramientas MCP y las políticas se declaran como **objetos de configuraci�
 Todo lo de este lab está automatizado en [`scripts/aigw-*.ps1`](../scripts/): modelos, servidor
 MCP, políticas y telemetría. Si quieres ir al grano, salta a [Scripts](#scripts).
 
+![Catálogo del AI Gateway con modelos y servidores MCP juntos](img/aigw-discover.png)
+
+*La pantalla que resume el SKU: **modelos y servidores MCP conviven en el mismo catálogo**, con
+la misma clave y el mismo gobierno. En el clásico son dos APIs distintas con dos políticas XML
+distintas; aquí son fichas del mismo inventario.*
+
 ---
 
 ## En qué se diferencia del APIM clásico
@@ -65,6 +71,14 @@ La propagación a ARM no es inmediata; hasta que termina, la API de gestión
 az feature show --namespace Microsoft.ApiManagement --name AIGatewayPreview --query properties.state -o tsv
 ```
 
+Cuando creas el servicio con este tier, en el resource group aparecen **dos** recursos:
+
+![Resource group de un AI Gateway recién creado](img/azure-rg-gateway.png)
+
+*El `API Management service` de siempre y, junto a él, un **Connector Namespace (preview)**. Ese
+segundo recurso es el que sostiene los **+1000 conectores SaaS** del Paso 6: no lo creas tú ni lo
+gestionas, pero conviene saber que está ahí antes de que alguien pregunte qué es.*
+
 ## Paso 1 · Dar acceso keyless a Foundry
 
 El asistente de importación asigna el rol por ti **si tienes permiso**. Para hacerlo explícito
@@ -83,6 +97,13 @@ foreach ($acct in @('aigwqyxvxaoai1','aigwqyxvxaoai2')) {
 
 **Models → Add models → Import from Foundry**: elige suscripción y recurso, y el asistente
 **descubre los despliegues** solo. En *Provider details* escoge **Managed identity**.
+
+![Lista de modelos importados en el AI Gateway](img/aigw-models.png)
+
+*Los tres modelos ya importados. Fíjate en que **los dos `gpt-4.1-mini` se llaman igual** y solo
+se distinguen por la columna "Provider" (`aigwqyxvxaoai1` y `aigwqyxvxaoai2`, las dos cuentas de
+Foundry). Es la misma restricción que impide el balanceo: el nombre del despliegue es la clave
+de enrutado y tiene que ser único por workspace.*
 
 También se puede hacer por ARM (ver el bloque de abajo), pero hay un detalle que cuesta un rato
 descubrir porque el síntoma engaña:
@@ -310,6 +331,14 @@ cd scripts
   [200] toolserver 'learn' -> requestRateLimit
 ```
 
+Y lo declarado por API sale en el portal, que es lo que conviene enseñar en la demo:
+
+![Página Policies del AI Gateway con las tres políticas y su cobertura](img/aigw-policies.png)
+
+*Lo valioso de esta pantalla no son las políticas, es el **"2 of 3 models covered"** debajo de
+cada una. El gateway te dice de un vistazo **qué assets se han quedado fuera** del guardarraíl —
+en el APIM clásico eso hay que deducirlo leyendo el XML de cada API una por una.*
+
 Después, [`aigw-policies-test.ps1`](../scripts/aigw-policies-test.ps1) lista lo que hay
 declarado y lanza contra el gateway el tráfico que cada guardarraíl debería frenar. Con `-Demo`
 baja el techo de tokens un momento para que el `429` salte a la segunda petición y lo restaura
@@ -406,6 +435,12 @@ https://<gateway>.azure-api.net/default/toolservers/<server>/mcp
 
 Con la misma `api-key`. Es el punto donde este SKU **supera** claramente al clásico.
 
+![Página MCP servers del AI Gateway](img/aigw-mcp.png)
+
+*"One governed endpoint that unifies multiple backends — MCP servers, APIs, connectors, and
+toolboxes". Un solo servidor publicado (`Microsoft Learn`) que el agente consume por el endpoint
+del gateway, no por el de origen: la clave del cliente es tuya y la puedes revocar.*
+
 Para comprobar que federa bien, pídele la lista de tools por JSON-RPC:
 
 ```powershell
@@ -422,21 +457,100 @@ y `microsoft_docs_fetch`— servidas ya por tu gateway y con tu clave, no con la
 ## Paso 7 · Observabilidad
 
 **Monitoring →** eliges destino: **Application Insights** o cualquier colector **OTLP**
-(Datadog, Splunk, Grafana Cloud). Con App Insights el portal añade además un panel de consumo
-de tokens ya montado.
-
-Esto sí tiene API, y es lo que configura [`aigw-setup.ps1`](../scripts/aigw-setup.ps1):
+(Datadog, Splunk, Grafana Cloud). Es lo que configura el paso 5 de
+[`aigw-setup.ps1`](../scripts/aigw-setup.ps1) sobre este recurso:
 
 ```
 .../service/<gw>/workspaces/default/telemetryExporters/<nombre>
 ```
 
-> ⚠️ **`tracing` solo vale para exportadores OpenTelemetry.** Si creas uno de tipo
-> `ApplicationInsights` con `tracing: true`, la API responde
-> `Tracing is currently supported only for OpenTelemetry telemetry exporters`. Con App Insights,
-> deja `metrics: true` y `tracing` sin tocar.
+### Hay dos tipos de exportador y solo uno sirve para todo
 
-### Qué llega y cómo consultarlo
+| `kind` | Qué manda | Panel *Monitoring* del portal |
+|---|---|---|
+| `ApplicationInsights` | solo métricas (tokens y coste) | **vacío** — pide "Set up monitoring" |
+| `OpenTelemetry` | métricas + logs + **trazas** | completo |
+
+El panel del portal lee de la tabla **`OTelSpans`**, y a esa tabla solo escribe el exportador
+OpenTelemetry. Si te queda el panel en blanco aunque `aigw-metrics.ps1` saque datos, es esto.
+
+![Panel Monitoring del AI Gateway ya poblado](img/aigw-monitoring-overview.png)
+
+*Así queda el panel una vez configurado el modo OpenTelemetry. Los dos indicadores de la derecha
+—**Trace failure rate** y **Blocked traces**— son los que no existen en ningún proxy LLM
+genérico: no miden errores del modelo, miden **cuántas peticiones frenó tu gobierno**.*
+
+### Cómo se configura el modo OpenTelemetry
+
+No basta con crear el exportador: hay que preparar antes el destino. Son cuatro llamadas, y el
+script las hace todas de forma idempotente.
+
+**1. Activar la ingesta OTLP en el Application Insights.** Azure aprovisiona por detrás un DCE y
+un DCR gestionados y publica tres endpoints. Ojo con la *api-version*, que es la del recurso de
+App Insights y no la del gateway:
+
+```http
+PATCH https://management.azure.com{appInsightsId}?api-version=2020-02-02-preview
+{ "properties": { "AzureMonitorWorkspaceIngestionMode": "Enabled" } }
+```
+
+**2. Esperar a que aparezcan los endpoints.** Tardan hasta un par de minutos; el asistente del
+portal hace exactamente la misma espera:
+
+```powershell
+az resource show --ids <appInsightsId> --query "{m:properties.OTLPMetricsEndpoint, l:properties.OTLPLogsEndpoint, t:properties.OTLPTracesEndpoint}"
+```
+
+**3. Dar permiso al gateway sobre el DCR gestionado.** El gateway escribe con su identidad
+administrada y necesita el rol **Monitoring Metrics Publisher**. Sin esto la ingesta falla en
+silencio: ni error ni datos.
+
+```powershell
+az role assignment create --assignee-object-id <principalId del gateway> `
+  --assignee-principal-type ServicePrincipal --role "Monitoring Metrics Publisher" `
+  --scope "/subscriptions/<sub>/resourceGroups/ai_<appInsights>_<appId>_managed/providers/Microsoft.Insights/dataCollectionRules/managed-<appInsights>-dcr"
+```
+
+**4. Crear el exportador y encender las señales.**
+
+```http
+PUT .../workspaces/default/telemetryExporters/appinsights?api-version=2025-09-01-preview
+{ "properties": {
+    "kind": "OpenTelemetry",
+    "payloadCapture": false,
+    "applicationInsights": { "resourceId": "<appInsightsId>" },
+    "openTelemetry": {
+      "metricsEndpoint": "...", "logsEndpoint": "...", "tracesEndpoint": "...",
+      "credentials": { "managedIdentity": { "resource": "https://monitor.azure.com" } }
+} } }
+```
+
+```http
+PATCH .../telemetryExporters/appinsights?api-version=2025-09-01-preview
+{ "properties": { "kind": "OpenTelemetry", "metrics": true, "tracing": true } }
+```
+
+Tres trampas que cuestan una tarde:
+
+> ⚠️ **El exportador nace con `metrics: false` y `tracing: false`.** Aunque el `kind` sea
+> correcto, si no mandas el PATCH del punto 4 no llega nada.
+>
+> ⚠️ **El PATCH de `tracing` exige repetir `kind` en el mismo cuerpo.** Si mandas solo
+> `{"tracing": true}` responde `400 Tracing is currently supported only for OpenTelemetry
+> telemetry exporters` aunque el exportador ya lo sea.
+>
+> ⚠️ **`kind` es inmutable.** Para pasar de `ApplicationInsights` a `OpenTelemetry` hay que
+> **borrar y recrear**: un PUT responde `400 Telemetry exporter kind cannot be changed after
+> creation`. Y sobre un exportador ya existente, el PUT completo choca con las credenciales que
+> el servicio normaliza al crearlo (`OpenTelemetry credentials cannot be patched together with
+> top-level headers or managedIdentity`): para actualizar hay que usar PATCH campo a campo, que
+> es justo lo que hace el portal.
+
+`payloadCapture` guarda el prompt y la respuesta completos dentro de la traza. Ayuda a depurar,
+pero manda datos de usuario a Log Analytics: en el script está apagado y se activa a mano con
+`-CapturePayloads`.
+
+### Qué llega: métricas
 
 La documentación llama a la métrica `gen_ai_client_token_usage` porque así se ve **desde
 PromQL**. Dentro de Application Insights aterriza en `customMetrics` con otro nombre:
@@ -471,15 +585,25 @@ cd scripts
 ```
 === Tokens por modelo ===
 modelo     backend                 completion_tokens prompt_tokens total_tokens
-chat       gpt-4.1-mini-2025-04-14               207           144          351
-chat-eu    gpt-4.1-mini-2025-04-14               124            72          196
-embeddings text-embedding-3-small                  0            16           16
+chat       gpt-4.1-mini-2025-04-14               341           313          654
+chat-eu    gpt-4.1-mini-2025-04-14               373           284          657
+embeddings text-embedding-3-small                  0            36           36
 
 === Consumo por clave de runtime ===
 clave  modelo     tokens llamadas
-master chat          351       10
-master chat-eu       196        5
+master chat-eu       657       20
+master chat          654       26
+master embeddings     36        9
 ```
+
+Lo mismo, sin consola, en la pestaña *Monitoring → Models*:
+
+![Pestaña Models del panel Monitoring con coste por modelo](img/aigw-monitoring-models.png)
+
+*El gateway **infiere el proveedor** a partir del identificador del modelo, normaliza los tokens
+a categorías comparables (entrada, salida, cacheados, razonamiento) y reparte el coste estimado:
+`chat` se lleva el 63,4 % del gasto. Abajo, en "Model usage by key", la atribución por clave de
+runtime — una clave por aplicación y tienes el chargeback hecho.*
 
 La consulta de fondo es KQL normal sobre `customMetrics`:
 
@@ -498,10 +622,114 @@ Y la misma métrica desde PromQL, si tu destino es un colector OTLP:
 sum by (gen_ai_request_model) (gen_ai_client_token_usage)
 ```
 
-> El tráfico de tools MCP se ve en el portal a través de App Insights, pero **no** se exporta
-> por OTLP: en preview solo viaja la métrica de tokens. Y no todos los backends reportan
-> tokens —algunos los omiten en streaming o en passthrough—: trátalo como *dato no disponible*,
-> no como cero.
+### Qué llega: trazas — la parte que enseña el gobierno
+
+Aquí está lo interesante. El gateway emite **un span por cada fase y por cada política
+evaluada**, así que la traza es la prueba en ejecución de que los guardarraíles del Paso 4 se
+están aplicando. [`aigw-traces.ps1`](../scripts/aigw-traces.ps1) lo saca por consola:
+
+```powershell
+cd scripts
+./aigw-traces.ps1
+./aigw-traces.ps1 -Hours 24 -Trace <TraceId>
+```
+
+```
+=== Politicas evaluadas ===
+politica              seccion  ambito desenlace veces media ms
+llm-token-limit       inbound  api    success      10     0.05
+llm-content-safety    inbound  api    success      10    90.86
+llm-content-safety    outbound api    success      10     0.02
+rate-limit-by-key     inbound  api    success       3     0.05
+set-backend-service   inbound  api    success      13     0.01
+llm-emit-token-metric inbound  global success      16     0.11
+forward-request       backend  global success      16  1009.93
+
+=== Detalle de una peticion ===
+POST /default/models/*                        1720.20 ms  success
+  inbound                                        0.51 ms  success
+    policy cors                                  0.01 ms  success
+    policy llm-emit-token-metric                 0.14 ms  success
+    policy llm-token-limit                       0.05 ms  success
+    policy llm-content-safety                   90.86 ms  success
+    policy set-backend-service                   0.01 ms  success
+  backend                                     1620.30 ms  success
+    policy forward-request                    1620.10 ms  success
+  outbound                                       0.24 ms  success
+```
+
+Fíjate en dos datos que solo se ven así:
+
+- **`llm-content-safety` cuesta ~90 ms** de los ~1,7 s de la petición. El gobierno no es gratis,
+  y aquí tienes la cifra para decidir dónde aplicarlo.
+- **`set-backend-service` aparece 13 veces y `llm-token-limit` 10**: los embeddings llevan otras
+  políticas. El desglose confirma que cada asset tiene los guardarraíles que le tocan.
+
+Cuando una política corta la petición, el span raíz deja de ser `success` y se ve quién cortó.
+Lánzalo después de `./aigw-policies-test.ps1 -Demo` para verlo.
+
+Y lo mismo en el portal, sin escribir KQL. **Monitoring → Traces** lista cada petición con su
+desenlace y las políticas que se le aplicaron:
+
+![Lista de trazas del AI Gateway con desenlaces](img/aigw-monitoring-traces.png)
+
+*Tres desenlaces distintos en la misma lista: `Succeeded`, `Failed 400` (lo rechazó el modelo) y
+`Blocked by policy` (lo rechazó **el gateway**). La columna "Applied policies" dice qué
+guardarraíles se evaluaron en cada una. Abajo aparecen también las llamadas a `Tool: Microsoft
+Learn`: modelos y herramientas comparten la misma vista.*
+
+Al abrir una de las bloqueadas se ve el *waterfall* completo — es la mejor captura para una demo:
+
+![Waterfall de una traza bloqueada por llm-token-limit](img/aigw-trace-blocked.png)
+
+*11 spans, 74 ms, y la etiqueta **Blocked by policy** propagándose hasta el span raíz. El motivo
+está en el span concreto: `policy llm-token-limit · OpenAITokenLimitExceeded`. Dos lecturas que
+solo da la traza:*
+
+- *La petición **nunca llegó al modelo**: no hay span de `backend`. El corte es en `inbound`, así
+  que no se ha pagado ni un token al proveedor.*
+- ***Se pagaron 73 de los 74 ms en `llm-content-safety` antes de rechazar por cuota.** El orden de
+  evaluación importa: si el límite de tokens fuera antes, ese análisis se habría ahorrado.*
+
+Y una vista agregada de lo mismo en **Monitoring → Policies**:
+
+![Pestaña Policies del panel Monitoring con peticiones bloqueadas por política](img/aigw-monitoring-policies.png)
+
+*El KPI que se lleva un CISO a una reunión: **4 peticiones bloqueadas, el 17,4 % de 23**, y el
+desglose de permitidas/bloqueadas por tipo de política. Content safety evaluó 17 peticiones sin
+bloquear ninguna; el límite de tokens bloqueó 4 de 17. Esto es evidencia de cumplimiento, no
+telemetría de rendimiento.*
+
+Los atributos útiles de cada span:
+
+| Atributo | Qué es |
+|---|---|
+| `azure.apim.policy.type` | la política concreta: `llm-token-limit`, `llm-content-safety`… |
+| `azure.apim.policy.section` | `inbound`, `outbound`, `backend` |
+| `azure.apim.policy.scope` | `global`, `api` — dónde está declarada |
+| `azure.apim.outcome` | `success` o el motivo del corte |
+| `azure.apim.api.name` | el modelo registrado que atendió |
+| `http.route` / `http.response.status_code` | ruta y código |
+
+Y el KQL, por si prefieres el portal de Azure:
+
+```kusto
+OTelSpans
+| where TimeGenerated > ago(1h) and Name startswith "policy "
+| extend politica = tostring(Attributes["azure.apim.policy.type"]),
+         desenlace = tostring(Attributes["azure.apim.outcome"])
+| summarize veces = count(), ["media ms"] = round(avg(DurationMs), 2) by politica, desenlace
+| order by veces desc
+```
+
+> El tráfico de tools MCP **sí** aparece en las trazas (`POST /default/toolservers/<x>/mcp`),
+> pero no emite métrica de tokens: es una llamada a herramienta, no a modelo. Y no todos los
+> backends reportan tokens —algunos los omiten en streaming o en passthrough—: trátalo como
+> *dato no disponible*, no como cero.
+>
+> Además, el contador **Tool calls** del panel solo suma `tools/call`. Un `tools/list` —que es lo
+> que hace `aigw-test.ps1`— sale en la lista de trazas pero deja la pestaña *Tools* a cero: no es
+> un fallo de telemetría, es que descubrir herramientas no es invocarlas.
 
 ---
 
@@ -512,10 +740,11 @@ este orden:
 
 | Script | Qué hace |
 |---|---|
-| [`aigw-setup.ps1`](../scripts/aigw-setup.ps1) | Comprueba feature flag e identidad, asigna *Foundry User*, crea proveedores, modelos, MCP y telemetría. Idempotente. |
+| [`aigw-setup.ps1`](../scripts/aigw-setup.ps1) | Comprueba feature flag e identidad, asigna *Foundry User*, crea proveedores, modelos, MCP, telemetría OTLP y políticas. Idempotente. |
 | [`aigw-test.ps1`](../scripts/aigw-test.ps1) | Prueba de humo: chat, embeddings, MCP `tools/list`, rechazo sin clave. Acaba en tabla de resultados. |
 | [`aigw-policies-test.ps1`](../scripts/aigw-policies-test.ps1) | Lista las políticas declaradas, comprueba su efecto y con `-Demo` fuerza el `429`. |
 | [`aigw-metrics.ps1`](../scripts/aigw-metrics.ps1) | Lee de Application Insights tokens, coste y consumo por clave. |
+| [`aigw-traces.ps1`](../scripts/aigw-traces.ps1) | Lee de Log Analytics las trazas OTLP: qué políticas se evaluaron, cuánto costó cada una y el árbol de spans de una petición. |
 | [`aigw-cleanup.ps1`](../scripts/aigw-cleanup.ps1) | Vacía los assets. Necesario para *cambiar* modelos o MCP, que son inmutables. Con `-Only policies` quita solo los guardarraíles. |
 
 ```powershell
@@ -524,6 +753,7 @@ cd scripts
 ./aigw-test.ps1         -GatewayName <gw> -GatewayResourceGroup <rg-gateway>
 ./aigw-policies-test.ps1 -GatewayName <gw> -GatewayResourceGroup <rg-gateway> -Demo
 ./aigw-metrics.ps1
+./aigw-traces.ps1
 ```
 
 El recorrido completo son unos 3 minutos y deja el gateway montado, probado, con políticas

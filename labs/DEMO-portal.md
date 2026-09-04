@@ -4,7 +4,8 @@ Misma historia que [DEMO.md](DEMO.md), pero **todo desde el portal de Azure**. S
 presentas compartiendo pantalla y no quieres pelearte con PowerShell, o cuando el cliente quiere
 ver *dónde vive* cada cosa.
 
-Duración ~25 min. Formato de cada acto: **dónde clicar → qué enseñar → qué decir**.
+Duración ~25 min (+6 opcionales del Acto 9). Formato de cada acto: **dónde clicar → qué enseñar
+→ qué decir**.
 
 ---
 
@@ -33,6 +34,15 @@ mantiene control de coste, seguridad e identidad."*
 **Enseñar:** son sólo tres piezas — `apim-aigw-dev-01` (el gateway), `appi-aigw-dev-01`
 (telemetría) y `log-aigw-dev-01` (Log Analytics). Los modelos viven aparte, en
 `rg-apim-workshop`.
+
+![Resource group del gateway con sus tres recursos](img/azure-rg-appinsights.png)
+
+*Tres recursos y una regla de alertas. Eso es todo el gateway.*
+
+![Resource group de los modelos de Foundry](img/azure-rg-foundry.png)
+
+*Y aquí los modelos: dos cuentas de Foundry en **Sweden Central**, mientras el gateway está en
+**East US**. Nada obliga a que compartan región.*
 
 **Decir:** *"El gateway es una capa fina. Vuestros modelos, vuestra región, vuestro coste — no se
 mueven. Lo que añadimos es la puerta de entrada."*
@@ -174,6 +184,41 @@ Luego cambia a la consola y lanza `claude`. Pide algo del repo para que se vea e
 
 > El texto sale de golpe, no palabra a palabra: el streaming del puente es sintético. Dilo tú
 > antes de que lo pregunten.
+
+---
+
+## Acto 9 · *(opcional, 6 min)* El SKU AI Gateway: lo mismo sin XML
+
+Este acto es **otro portal distinto** — `https://ai.gateway.azure.com` — y solo aplica si tienes
+un servicio con el tier *AI Gateway (preview)*. Ver [lab 13](13-ai-gateway-tier.md).
+
+**Dónde:** portal del gateway → **Home**.
+
+![Home del portal del AI Gateway](img/aigw-home.png)
+
+**Enseñar:** el endpoint y el botón *Get access keys*, y el menú de la izquierda: Models, MCP
+servers, Policies, Monitoring. **No hay "APIs" ni editor XML en ninguna parte.**
+
+**Dónde (2):** **Policies**. Es el mismo gobierno del Acto 4 declarado como configuración.
+
+![Página Policies del AI Gateway](img/aigw-policies.png)
+
+**Decir:** *"Lo que en el APIM clásico era una política XML por API, aquí es una fila con su
+cobertura: 2 de 3 modelos cubiertos. La pregunta 'qué se me ha quedado sin gobernar' se responde
+mirando, no auditando código."*
+
+**Dónde (3):** **Monitoring → Policies**, y luego **Traces** → abre una marcada *Blocked by
+policy*.
+
+![Waterfall de una traza bloqueada por política](img/aigw-trace-blocked.png)
+
+**Decir:** *"Esta petición no llegó al modelo: la paró el límite de tokens en la entrada. No hay
+factura de tokens por ella. Y el waterfall dice exactamente qué política la paró y cuánto costó
+cada guardarraíl en milisegundos."*
+
+> Contrapunto honesto si te lo preguntan: este tier **no tiene caché semántica ni balanceo entre
+> despliegues**, que son los actos 5 y el lab 05. Los dos gateways se complementan; hoy el
+> soportado para producción es el clásico.
 
 ---
 

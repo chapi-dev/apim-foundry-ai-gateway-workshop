@@ -83,11 +83,21 @@ de punta a punta:
 
 ```powershell
 cd scripts
-./aigw-setup.ps1         -GatewayName <gw> -GatewayResourceGroup <rg>   # modelos, MCP, políticas, telemetría
+./aigw-setup.ps1         -GatewayName <gw> -GatewayResourceGroup <rg>   # modelos, MCP, políticas, telemetría OTLP
 ./aigw-test.ps1          -GatewayName <gw> -GatewayResourceGroup <rg>   # prueba de humo
 ./aigw-policies-test.ps1 -GatewayName <gw> -GatewayResourceGroup <rg> -Demo   # guardarraíles: 400 / 403 / 429
 ./aigw-metrics.ps1                                                      # tokens y coste reales
+./aigw-traces.ps1                                                       # trazas: qué política se evaluó y cuánto tardó
 ```
+
+Lo que se obtiene al final: una traza que demuestra el gobierno en ejecución.
+
+![Waterfall de una petición bloqueada por la política de límite de tokens](labs/img/aigw-trace-blocked.png)
+
+*Una petición **frenada por el gateway antes de llegar al modelo** — no hay span de `backend`, así
+que no se ha pagado ni un token. El motivo aparece en el span exacto que la cortó
+(`llm-token-limit · OpenAITokenLimitExceeded`) y cada guardarraíl trae su coste en milisegundos.
+Un proxy LLM te dice que hubo un 429; esto te dice **quién lo decidió, por qué y qué te costó**.*
 
 ---
 
@@ -118,7 +128,8 @@ pip install openai
 python clients/test-openai.py
 ```
 
-Después, sigue los [labs](labs/) en orden.
+Después, sigue el [**recorrido de labs**](labs/README.md) — del 00 al 13, con lo que necesita
+cada uno.
 
 ---
 
@@ -182,6 +193,7 @@ Al terminar (limpieza segura):
 ```
 infra/        Bicep del núcleo + políticas XML (el puente Anthropic→OpenAI vive aquí)
 labs/         Guías paso a paso (00 → 13) + guión de demo (consola y portal)
+labs/img/     Capturas reales del portal del AI Gateway y de Azure (anonimizadas)
 clients/      Pruebas OpenAI SDK / HTTP + LiteLLM (opcional, lab 08)
 scripts/      deploy / get-keys / cleanup, y aigw-* para el SKU AI Gateway (lab 13)
 ```
