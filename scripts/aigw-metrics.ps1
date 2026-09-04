@@ -35,7 +35,8 @@ function Invoke-Kql {
     }
     $table = ($response.Content | ConvertFrom-Json).tables[0]
     if (-not $table.rows) { return @() }
-    $columns = $table.columns.name
+    # Con una sola columna la propiedad no llega como array y el indexado devolveria caracteres.
+    $columns = @($table.columns.name)
     $table.rows | ForEach-Object {
         $row = $_
         $object = [ordered]@{}
